@@ -1,0 +1,33 @@
+# 비밀/로컬 데이터 — 절대 커밋 금지
+config.py
+config_reminder.py
+token.txt
+.env
+
+# 수집 데이터베이스 (로컬 전용)
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 로그
+*.log
+
+# 분석 리포트 (서버 멤버 데이터 포함 — 로컬 전용)
+analysis/report*.md
+
+# 추출 결과/상태 (서버 데이터 — 로컬 전용)
+extract/*.csv
+extract/_summary.txt
+extract/_processed.json
+extract/_compare.txt
+
+# 파이썬
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 로컬/하네스 상태
+.claude/
