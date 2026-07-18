@@ -2,50 +2,128 @@
 #   추출 두뇌: 사전필터 → exaone+few-shot → 정규화 → 작업자/의뢰자 판별 → 탭 분류
 import re
 import json
+import time
 import datetime
+import unicodedata
 import urllib.request
 import config
 
 NIM_RE = re.compile(r"([가-힣A-Za-z0-9_]{1,12})님")
 BLOCK = set(config.NIM_BLOCKLIST)
 
+# 출력은 Ollama format(JSON 스키마)으로 강제 — 포맷 깨짐/라벨 echo 원천 차단.
+#   프롬프트는 브레이스({}) 예시를 포함하므로 str.format 금지 — 호출부에서 메시지를 이어붙인다.
 DEADLINE_PROMPT = (
-    "다음 디스코드 메시지에서 '작업 일정'을 모두 뽑아.\n"
-    "한 메시지에 일정이 여러 개일 수 있다. 서로 다른 작업이면 각각 한 줄로 분리해라.\n"
-    "각 줄 형식(정확히): `작업내용 | 기한 | 진행`\n"
-    "  - 작업내용: 무엇을 하는지. '@@님'(의뢰 대상) 이름이 붙어 있으면 떼지 말고 그대로 포함해라. (필수)\n"
-    "  - 기한: 마감일/날짜. 범위면 '7/1~8/16'처럼 ~ 붙여 그대로 둬라(끝날짜만 X). 없으면 빈칸\n"
-    "  - 진행: 진행상황·완료여부 문구가 있으면. 없으면 빈칸\n"
+    "다음 디스코드 메시지에서 '작업 일정'을 모두 뽑아라.\n"
+    "출력(JSON만): {\"items\": [{\"작업내용\": \"...\", \"기한\": \"...\", \"진행\": \"...\"}]}\n"
     "규칙:\n"
+    "  - 작업내용: 간결한 작업명(문장 전체 금지). '@@님'(의뢰 대상) 이름이 붙어 있으면 떼지 말고 그대로 포함.\n"
+    "  - 기한: 마감·예정 날짜. 범위면 '7/1~8/16'처럼 ~ 유지(끝날짜만 X).\n"
+    "  - 메시지 앞머리의 날짜 헤더('5월 13일', '## 0514', '-260516', '0517일', '0607(일)' 등, "
+    "뒤에 '> ' 인용부호 불릿이 와도 무시하고 날짜로 인식)는 그 보고의 날짜다 — "
+    "작업에 별도 날짜가 없으면 헤더 날짜를 'M/D'로 기한에 넣어라. 날짜가 전혀 없으면 빈칸.\n"
+    "  - 진행: 진행상황·완료여부 문구('완료', '80% 진행', '내일 마무리 예정' 등). 없으면 빈칸.\n"
+    "  - 일일 작업 보고('~진행중입니다', '~했습니다', '~예정입니다')도 일정이다. 놓치지 마라.\n"
+    "  - '거의 완성'·'마무리 예정'·'컨펌 예정'은 완료가 아니다. '완료'는 실제로 끝났을 때만 써라.\n"
+    "  - '~까지 컨펌받으려고 정리중이다/준비중이다'처럼 목표 시점 + 구체적 항목 나열이 함께 있으면 "
+    "일정이다(잡담 아님). 나열된 항목은 각각 분리. 단, 그 반대로 상대에게 '언제 받을 수 있는지/맞는지' "
+    "묻는 질문(물음표, '~일까요', '~궁금해요')이면 이 규칙을 적용하지 말고 items는 빈 배열.\n"
     "  - 같은 작업을 쪼개지 마라. '모델링'과 '의상'처럼 분명히 다른 작업만 분리.\n"
-    "  - 작업내용 앞의 '@@님' 이름은 누가 의뢰한/대상인지라 중요하니 항상 살려라.\n"
-    "  - 일정이 하나도 없으면 `없음` 한 단어만.\n"
-    "  - 라벨·설명·번호·머리글 금지. 데이터 줄만 출력.\n\n"
-    "예시1) 메시지: \"빈즈님 캐릭터 모델링 11/20까지요\"\n->\n빈즈님 캐릭터 모델링 | 11/20 | \n\n"
-    "예시2) 메시지: \"뿌요님 여름 의상 작업 6/17~7/20\"\n->\n뿌요님 여름 의상 작업 | 6/17~7/20 | \n\n"
-    "예시3) 메시지: \"마태자님 모델링 7/20까지, 의상 7/25까지\"\n->\n마태자님 모델링 | 7/20 | \n마태자님 의상 | 7/25 | \n\n"
-    "예시4) 메시지: \"텍스처 작업 다음주 월요일까지 / 리깅은 이번주 금요일\"\n->\n텍스처 작업 | 다음주 월요일 | \n리깅 | 이번주 금요일 | \n\n"
-    "예시5) 메시지: \"모델링 7/20까지였는데 절반 정도 끝냈어요\"\n->\n모델링 | 7/20 | 절반 정도 진행\n\n"
-    "예시6) 메시지: \"캐릭터 모델링 완료했습니다\"\n->\n캐릭터 모델링 |  | 완료\n\n"
-    "예시7) 메시지: \"다들 점심 드셨어요? 날씨 좋네요\"\n->\n없음\n\n"
-    "메시지: \"{m}\"\n->\n")
+    "  - 일정 정보가 없는 잡담·질문이면 items는 빈 배열.\n\n"
+    "예시1) \"빈즈님 캐릭터 모델링 11/20까지요\"\n"
+    "-> {\"items\": [{\"작업내용\": \"빈즈님 캐릭터 모델링\", \"기한\": \"11/20\", \"진행\": \"\"}]}\n"
+    "예시2) \"5월 13일\n앞부분 폴리곤 정리 + 어색한 부분 수정\"\n"
+    "-> {\"items\": [{\"작업내용\": \"앞부분 폴리곤 정리 + 어색한 부분 수정\", \"기한\": \"5/13\", \"진행\": \"\"}]}\n"
+    "예시3) \"마태자님 모델링 7/20까지, 의상 7/25까지\"\n"
+    "-> {\"items\": [{\"작업내용\": \"마태자님 모델링\", \"기한\": \"7/20\", \"진행\": \"\"}, "
+    "{\"작업내용\": \"마태자님 의상\", \"기한\": \"7/25\", \"진행\": \"\"}]}\n"
+    "예시4) \"문모모님 헤어 90% 완성! 내일 마무리하고 컨펌받을 예정\"\n"
+    "-> {\"items\": [{\"작업내용\": \"문모모님 헤어\", \"기한\": \"\", \"진행\": \"90% 진행, 내일 마무리 예정\"}]}\n"
+    "예시5) \"네일 전부 완성해서 컨펌요청 드렸습니다\"\n"
+    "-> {\"items\": [{\"작업내용\": \"네일\", \"기한\": \"\", \"진행\": \"완료\"}]}\n"
+    "예시6) \"뿌요님 여름 의상 작업 6/17~7/20\"\n"
+    "-> {\"items\": [{\"작업내용\": \"뿌요님 여름 의상 작업\", \"기한\": \"6/17~7/20\", \"진행\": \"\"}]}\n"
+    "예시7) \"다들 점심 드셨어요? 날씨 좋네요\"\n-> {\"items\": []}\n\n"
+    "예시8) \"0607(일)\n> 비전용뚜따 작업 의뢰 들어온거  작업\n> 오늘은 개인의뢰 위주로 할것같습니당\"\n"
+    "-> {\"items\": [{\"작업내용\": \"비전용뚜따 작업\", \"기한\": \"6/7\", \"진행\": \"\"}]}\n"
+    "예시9) \"이번주말중으로 헤드,헤어,의상 러프 컨펌 받으려고 정리중이여서 딜레이가 심하진 않을것 같습니다\"\n"
+    "-> {\"items\": [{\"작업내용\": \"헤드\", \"기한\": \"이번주말\", \"진행\": \"러프 컨펌 준비중\"}, "
+    "{\"작업내용\": \"헤어\", \"기한\": \"이번주말\", \"진행\": \"러프 컨펌 준비중\"}, "
+    "{\"작업내용\": \"의상\", \"기한\": \"이번주말\", \"진행\": \"러프 컨펌 준비중\"}]}\n\n")
+DEADLINE_SCHEMA = {
+    "type": "object",
+    "properties": {"items": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"작업내용": {"type": "string"},
+                       "기한": {"type": "string"},
+                       "진행": {"type": "string"}},
+        "required": ["작업내용", "기한", "진행"]}}},
+    "required": ["items"]}
+
 SETTLE_PROMPT = (
-    "다음 디스코드 메시지에서 정산(돈) 정보를 뽑아.\n"
-    "규칙: 정보가 있으면 정확히 `항목 | 금액 | 상태` 한 줄로만. 없으면 `없음` 한 단어. 라벨·설명·다른 줄 금지.\n\n"
-    "예시1) 메시지: \"키키님 모델링비 20만원 입금완료\" -> 모델링비 | 20만원 | 완료\n"
-    "예시2) 메시지: \"디자인비 7만원 아직 정산 안됐어요\" -> 디자인비 | 7만원 | 대기\n"
-    "예시3) 메시지: \"롤리 - PM업무 - 백만원\" -> PM업무 | 백만원 | 대기\n"
-    "예시4) 메시지: \"넵 알겠습니다\" -> 없음\n\n"
-    "메시지: \"{m}\"")
+    "다음 디스코드 메시지에서 정산(돈) 정보를 뽑아라.\n"
+    "출력(JSON만): {\"found\": true/false, \"항목\": \"...\", \"금액\": \"...\", \"상태\": \"...\"}\n"
+    "규칙:\n"
+    "  - 돈 얘기가 아니면 found는 false, 나머지는 빈칸.\n"
+    "  - 상태: 입금/지급이 끝났으면 '완료', 아니면 '대기'. 견적·누락건 추가는 '대기'.\n"
+    "  - 세부 항목별 금액과 총액이 같이 있으면 총액을 써라.\n"
+    "  - 구체적 업무명/항목명이 없고 '1인당 n개씩 총 얼마'처럼 단순 수량 계산 설명이면 "
+    "항목은 빈 문자열로 둬라(found는 true 유지).\n\n"
+    "예시1) \"키키님 모델링비 20만원 입금완료\"\n"
+    "-> {\"found\": true, \"항목\": \"모델링비\", \"금액\": \"20만원\", \"상태\": \"완료\"}\n"
+    "예시2) \"디자인비 7만원 아직 정산 안됐어요\"\n"
+    "-> {\"found\": true, \"항목\": \"디자인비\", \"금액\": \"7만원\", \"상태\": \"대기\"}\n"
+    "예시3) \"롤리 - PM업무 - 백만원\"\n"
+    "-> {\"found\": true, \"항목\": \"PM업무\", \"금액\": \"백만원\", \"상태\": \"대기\"}\n"
+    "예시4) \"귀 수정 및 접합 / 8만원 (귀 5, 접합 3) 견적입니다\"\n"
+    "-> {\"found\": true, \"항목\": \"귀 수정 및 접합\", \"금액\": \"8만원\", \"상태\": \"대기\"}\n"
+    "예시5) \"작업 비용 정산드렸습니다!\"\n"
+    "-> {\"found\": true, \"항목\": \"작업 비용\", \"금액\": \"\", \"상태\": \"완료\"}\n"
+    "예시6) \"넵 알겠습니다\"\n"
+    "-> {\"found\": false, \"항목\": \"\", \"금액\": \"\", \"상태\": \"\"}\n"
+    "예시7) \"아아 1인당 4개씩 총 20만원입니다!\"\n"
+    "-> {\"found\": true, \"항목\": \"\", \"금액\": \"20만원\", \"상태\": \"대기\"}\n\n")
+SETTLE_SCHEMA = {
+    "type": "object",
+    "properties": {"found": {"type": "boolean"},
+                   "항목": {"type": "string"},
+                   "금액": {"type": "string"},
+                   "상태": {"type": "string"}},
+    "required": ["found", "항목", "금액", "상태"]}
 
 
-def ollama(prompt):
-    body = json.dumps({"model": config.MODEL, "prompt": prompt, "stream": False,
-                       "keep_alive": "30m",  # 모델을 30분 메모리에 유지 → 재로드 지연 방지
-                       "options": {"temperature": 0}}).encode("utf-8")
-    req = urllib.request.Request(config.OLLAMA, data=body, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return json.loads(r.read()).get("response", "").strip()
+# thinking 지원 모델 프리픽스 — 즉답형 프롬프트라 생각과정 비활성 (미지원 모델에 넣으면 400)
+_THINK_OFF_PREFIXES = ("qwen3", "deepseek-r1", "magistral")
+
+
+def ollama(prompt, schema=None):
+    payload = {"model": config.MODEL, "prompt": prompt, "stream": False,
+               "keep_alive": "30m",  # 모델을 30분 메모리에 유지 → 재로드 지연 방지
+               "options": {"temperature": 0}}
+    if schema is not None:
+        payload["format"] = schema         # 문법 강제(constrained decoding) → 항상 유효 JSON
+    if any(config.MODEL.startswith(p) for p in _THINK_OFF_PREFIXES):
+        payload["think"] = False
+    body = json.dumps(payload).encode("utf-8")
+    last = None
+    for attempt in range(2):              # 일시 멈칫 자동 복구 (최대 2회 시도)
+        try:
+            req = urllib.request.Request(config.OLLAMA, data=body, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                return json.loads(r.read()).get("response", "").strip()
+        except Exception as e:
+            last = e
+            if attempt == 0:
+                time.sleep(3)             # 잠깐 쉬고 한 번 더
+    raise last
+
+
+def _json_or(out, default):
+    """LLM 출력 → JSON. 스키마 강제라 실패는 드물지만 방어."""
+    try:
+        return json.loads(out or "")
+    except Exception:
+        return default
 
 
 WEEKDAYS = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4, "토": 5, "일": 6}
@@ -124,6 +202,29 @@ def _norm_one(t):
     return t   # 그 외 불명확 → 원본 유지
 
 
+_RANGE_DAY_RE = re.compile(r"^\s*(\d{1,2})\s*일?\s*$")   # 범위 끝의 '10일'/'10'
+_YMD_FULL_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
+def _range_right(nl, right):
+    """범위 끝쪽 정규화. '6월5일~10일'처럼 일(日)만 있으면 앞 날짜의 연·월을 상속.
+    (_norm_one의 '지난 날짜면 다음 달' 규칙이 범위 끝에 적용돼 엉뚱한 달이 되던 버그 방지)"""
+    m = _RANGE_DAY_RE.match(right or "")
+    ym = _YMD_FULL_RE.match(nl or "")
+    if m and ym:
+        y, mo, left_day = int(ym.group(1)), int(ym.group(2)), int(ym.group(3))
+        d = int(m.group(1))
+        if d < left_day:                       # '6월28일~3일' → 다음 달 3일
+            mo += 1
+            if mo > 12:
+                mo, y = 1, y + 1
+        try:
+            return datetime.date(y, mo, d).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    return _norm_one(right)
+
+
 def norm_date(s):
     t = (s or "").strip()
     if not t:
@@ -131,7 +232,8 @@ def norm_date(s):
     # 범위 (A ~ B): 양쪽 각각 정규화. 정렬·D-day는 앞 날짜 기준(시트에서 처리).
     if "~" in t:
         left, right = t.split("~", 1)
-        nl, nr = _norm_one(left), _norm_one(right)
+        nl = _norm_one(left)
+        nr = _range_right(nl, right)
         if nl == left.strip() and nr == right.strip():   # 양쪽 다 애매(말~초 등) → 원문 유지
             return t
         return f"{nl} ~ {nr}"
@@ -190,22 +292,20 @@ def has(text, hints):
     return any(h in text for h in hints)
 
 
-def find_client(content, context):
-    p = nim_in(content)
-    if p:
-        return p
-    for c in context:
-        p = nim_in(c)
-        if p:
-            return p
-    return ""
+def find_client(content, context=None):
+    # 이웃 메시지(context)에서 'OO님'을 긁으면 엉뚱한 의뢰자가 새어들어와 오탐 →
+    #   본문의 'OO님'만 사용. 본문에 없으면 빈칸(PM이 채움). context 스캔이 오탐의 주원인이었다.
+    return nim_in(content)
 
 
 # LLM이 값 대신 틀의 라벨을 그대로 뱉으면 = 추출 실패
 LABELS = {"항목", "금액", "상태", "작업내용", "기한", "담당자", "날짜", "없음", "내용"}
 
 # 완료로 간주할 진행 문구
-DONE_HINTS = ["완료", "끝냈", "끝났", "마무리", "마쳤", "done", "완성"]
+DONE_HINTS = ["완료", "끝냈", "끝났", "끝내", "마무리", "마쳤", "done", "완성"]
+# 완료어가 함께 있어도 '아직 안 끝남'으로 봐야 하는 신호 (완료어보다 우선)
+#   "거의 완성"=almost, "마무리 후 현재 정리 중"=계속 진행, "완료 예정"=아직 등.
+NOT_DONE_HINTS = ["예정", "예상", "진행중", "거의", "계속", "현재", "하는중", "하고있"]
 
 
 def _canon_task(s):
@@ -213,9 +313,13 @@ def _canon_task(s):
 
 
 def is_done(text):
-    """진짜 완료인지 — 완료 단어가 있고 '예정/예상'(아직 안 됨)이 아닐 때만."""
+    """진짜 완료인지 — 완료 단어가 있고 '아직 안 됨' 신호가 없을 때만.
+    '아직 안 됨' 신호(NOT_DONE_HINTS, 문미 '중')는 완료어보다 우선한다:
+    '거의 완성'·'마무리 후 현재 정리 중'은 완료가 아니라 진행중."""
     t = (text or "").replace(" ", "")
-    if "예정" in t or "예상" in t:        # "완료 예정" = 아직 안 됨
+    if any(k in t for k in NOT_DONE_HINTS):        # "거의/현재/계속/예정…"=아직 안 됨
+        return False
+    if t.endswith("중"):                            # "정리중"·"작업중"·"검수중"=진행 중
         return False
     return any(k in t for k in DONE_HINTS)
 
@@ -228,24 +332,44 @@ def detect_status(progress):
 # 작업명이 순수 날짜/기호로만 구성됐는지 (잡담 환각 방어)
 _DATEONLY_RE = re.compile(r"^[\d\s/.\-월일주요()]+$")
 
+# 스냅샷 리스트 줄 포맷 잔재 정리용
+_LEAD_JUNK_RE = re.compile(r"^\s*(?:[-–—•·▪‣*∙]+|\d{1,2}\s*[.)])\s*")
+_LEAD_DATE_RE = re.compile(r"^\s*(?:20\d{2}[-./]\d{1,2}[-./]\d{1,2}|\d{1,2}\s*[/.]\s*\d{1,2})\s*[-~–]?\s*")
+# 알맹이 없는 껍데기 작업명 (canon 기준) → 폐기
+_GENERIC_ONLY = {"개인일정", "개인의뢰", "개인작업", "개인", "작업", "일정", "의뢰", "기타"}
 
-def parse_deadline_lines(out):
-    """LLM 멀티라인 출력 → [{'작업내용','기한','진행'}, ...].
-    잘못된/라벨/빈/날짜만 줄은 폐기. (작업명,기한) 중복 제거."""
-    if not out:
-        return []
-    if out.strip().startswith("없음"):
-        return []
-    rows, seen = [], set()
-    for raw in out.splitlines():
-        line = raw.strip()
-        if not line or "|" not in line:
+
+def _clean_task(t):
+    """작업내용 머리의 불릿/번호/날짜 토큰 제거 ('- 구슬요…', '7/20 - 구슬요…')."""
+    t = (t or "").strip()
+    for _ in range(4):
+        m = _LEAD_JUNK_RE.match(t)
+        if m and m.end() < len(t):
+            t = t[m.end():].strip()
             continue
-        p = [x.strip() for x in line.split("|")] + ["", "", ""]
-        task, due, prog = p[0], p[1], p[2]
+        m = _LEAD_DATE_RE.match(t)               # 날짜는 뒤에 실제 내용(한글/영문)이 있을 때만 제거
+        if m and m.end() < len(t) and re.search(r"[가-힣A-Za-z]", t[m.end():]):
+            t = t[m.end():].strip()
+            continue
+        break
+    return t.strip()
+
+
+def parse_deadline_json(out):
+    """LLM JSON 출력 → [{'작업내용','기한','진행'}, ...].
+    라벨/빈/날짜만 작업명은 폐기. (작업명,기한) 중복 제거."""
+    rows, seen = [], set()
+    for r in _json_or(out, {}).get("items", []):
+        if not isinstance(r, dict):
+            continue
+        task = _clean_task(str(r.get("작업내용", "")))   # 머리 불릿/날짜 제거 ('- 구슬요…', '7/20 - …')
+        due = str(r.get("기한", "")).strip()
+        prog = str(r.get("진행", "")).strip()
         if not task or task in LABELS:
             continue
         if _DATEONLY_RE.match(task):            # 작업명이 날짜/기호뿐 = 환각
+            continue
+        if _canon_task(task) in _GENERIC_ONLY:   # 알맹이 없는 '개인일정/개인의뢰' 껍데기 → 폐기
             continue
         ck = (_canon_task(task), _canon_task(due))   # (작업명,기한) 튜플 dedup
         if ck in seen:
@@ -255,15 +379,69 @@ def parse_deadline_lines(out):
     return rows
 
 
+def extract_deadline(text):
+    """메시지 → 일정 rows. analyze()와 bot의 확인필요 재추출이 공용."""
+    return parse_deadline_json(
+        ollama(DEADLINE_PROMPT + f'메시지: "{text}"\n->\n', DEADLINE_SCHEMA))
+
+
+def extract_settle(text):
+    """메시지 → {'항목','금액','상태'}(정규화 전 항목, 정규화된 금액/상태) | None(돈 얘기 아님).
+    항목이 라벨 echo면 {'항목': ''}로 반환해 호출부가 확인필요 회송 판단."""
+    j = _json_or(ollama(SETTLE_PROMPT + f'메시지: "{text}"\n->\n', SETTLE_SCHEMA), {})
+    if not j.get("found"):
+        return None
+    item = str(j.get("항목", "")).strip()
+    if item in LABELS:
+        item = ""
+    return {"항목": item,
+            "금액": norm_amount(str(j.get("금액", ""))),
+            "상태": norm_settle_status(str(j.get("상태", "")))}
+
+
+# '[날짜] 대상 작업 | 작업내용' 구조의 전체일정 줄 (사용자 '|' 구분자)
+_SNAP_LINE_RE = re.compile(r"^\s*\[\s*([^\]]+?)\s*\]\s*(.*?)\s*[|｜]\s*(.+?)\s*$")
+_WORK_SUFFIX_RE = re.compile(r"\s*작업\s*$")
+
+
+def parse_structured_snapshot(text):
+    """'[7/8 ~ 7/12] 희또 작업 | 의상 삼면도' 같은 구조화 전체일정을 결정적으로 파싱.
+    사용자의 '|' 구분자가 DEADLINE_PROMPT의 '|' 출력 포맷과 충돌해 LLM이 오파싱(작업내용을
+    껍데기 'OO 작업'으로 만들고 실제 내용을 진행칸에 넣거나 유실)하던 것을 우회한다.
+    2줄 이상 매치될 때만 rows 반환(그 포맷이 확실). 아니면 None → LLM 폴백."""
+    rows, seen = [], set()
+    for raw in (text or "").splitlines():
+        m = _SNAP_LINE_RE.match(raw)
+        if not m:
+            continue
+        date, prefix, content = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
+        prefix = _WORK_SUFFIX_RE.sub("", prefix).strip()     # "희또 작업" → "희또"
+        task = _clean_task((prefix + " " + content).strip() if prefix else content)
+        if not task or _canon_task(task) in _GENERIC_ONLY:
+            continue
+        ck = _canon_task(task)                                # 완전 동일 작업명만 중복 제거
+        if ck in seen:
+            continue
+        seen.add(ck)
+        rows.append({"작업내용": task, "기한": date, "진행": ""})
+    return rows if len(rows) >= 2 else None
+
+
 # 답장 진행문구 전용 경량 추출 프롬프트
 PROGRESS_PROMPT = (
-    "다음은 어떤 작업에 대한 '진행 상황 답장'이다. 진행내용과 날짜를 뽑아.\n"
-    "형식(정확히): `진행 | 날짜`  (날짜 없으면 빈칸). 진행 문구가 전혀 없으면 `없음`.\n\n"
-    "예시1) \"모델링 절반 정도 했어요\" -> 모델링 절반 진행 | \n"
-    "예시2) \"7/22까지 미루겠습니다\" -> 기한 연기 | 7/22\n"
-    "예시3) \"다 끝냈습니다\" -> 완료 | \n"
-    "예시4) \"ㅇㅋ 감사합니다\" -> 없음\n\n"
-    "메시지: \"{m}\"\n->\n")
+    "다음은 어떤 작업에 대한 '진행 상황 답장'이다. 진행내용과 날짜를 뽑아라.\n"
+    "출력(JSON만): {\"found\": true/false, \"진행\": \"...\", \"날짜\": \"...\"}\n"
+    "진행 문구가 전혀 없으면 found는 false. 날짜 없으면 빈칸.\n\n"
+    "예시1) \"모델링 절반 정도 했어요\" -> {\"found\": true, \"진행\": \"모델링 절반 진행\", \"날짜\": \"\"}\n"
+    "예시2) \"7/22까지 미루겠습니다\" -> {\"found\": true, \"진행\": \"기한 연기\", \"날짜\": \"7/22\"}\n"
+    "예시3) \"다 끝냈습니다\" -> {\"found\": true, \"진행\": \"완료\", \"날짜\": \"\"}\n"
+    "예시4) \"ㅇㅋ 감사합니다\" -> {\"found\": false, \"진행\": \"\", \"날짜\": \"\"}\n\n")
+PROGRESS_SCHEMA = {
+    "type": "object",
+    "properties": {"found": {"type": "boolean"},
+                   "진행": {"type": "string"},
+                   "날짜": {"type": "string"}},
+    "required": ["found", "진행", "날짜"]}
 
 
 def extract_progress(text):
@@ -271,15 +449,256 @@ def extract_progress(text):
     t = (text or "")[:300]
     if len(t) < 2:
         return None
-    out = ollama(PROGRESS_PROMPT.format(m=t))
-    if not out or out.strip().startswith("없음") or "|" not in out:
+    j = _json_or(ollama(PROGRESS_PROMPT + f'메시지: "{t}"\n->\n', PROGRESS_SCHEMA), {})
+    if not j.get("found"):
         return None
-    p = [x.strip() for x in out.split("|")] + ["", ""]
-    prog = p[0]
+    prog = str(j.get("진행", "")).strip()
     if not prog or prog in LABELS:
         return None
-    date = norm_date(p[1]) if p[1] else None
+    d = str(j.get("날짜", "")).strip()
+    date = norm_date(d) if d else None
     return {"진행내용": prog, "날짜": date or None}
+
+
+# ═══════════ 스냅샷(전체일정) 매칭 엔진 ═══════════
+CANON_VERSION = 2    # canon 규칙 변경 시 +1 → 기동 시 reg_recanon으로 전량 재계산 (v2: 식별 괄호 보존)
+
+_PAREN_RE = re.compile(r"[(\[{（【〔「『［]\s*(.*?)\s*[)\]}）】〕」』］]")
+_NIM_STRIP_RE = re.compile(r"([가-힣a-z0-9_]{1,12})님")
+_TRAIL = ("까지", "부터", "작업", "예정", "진행", "중")
+# 괄호주석 중 '노이즈'만 제거한다: 날짜/기간 + 아래 카테고리 태그.
+#   ⚠️ "(뮤 헤어 5종)" "(위도 의상)" 같은 식별용 괄호는 반드시 보존 —
+#   이걸 지우면 서로 다른 작업이 전부 canon "개인일정"으로 뭉쳐 중복/오병합이 난다.
+_NOISE_PAREN = {"개인일정", "개인의뢰", "개인작업", "개인", "참고", "비고", "메모", "예시"}
+
+
+def _is_dateish(inner):
+    """괄호 내용이 날짜/기간뿐인가 (예: '6/28~7/15', '7월 중순')."""
+    x = re.sub(r"[\d\s.~/\-()]", "", inner)
+    x = re.sub(r"(월|일|주|요일|초|중순|중|말|부터|까지)", "", x)
+    return inner != "" and x == ""
+
+
+def _strip_noise_parens(t):
+    def repl(m):
+        inner = m.group(1).strip()
+        if not inner:
+            return ""
+        if re.sub(r"\s", "", inner) in _NOISE_PAREN:
+            return ""                            # 카테고리 태그 → 제거
+        if _is_dateish(inner):
+            return ""                            # 날짜/기간 주석 → 제거
+        return m.group(0)                        # 식별용 내용 → 보존
+    return _PAREN_RE.sub(repl, t)
+
+
+def canon(s):
+    """스냅샷 레지스트리 매칭용 작업명 정규화. (_canon_task와 별개)"""
+    t = unicodedata.normalize("NFKC", (s or "")).lower().strip()
+    if not t:
+        return ""
+    t2 = _strip_noise_parens(t)                  # 날짜/카테고리 괄호만 제거(식별 괄호는 보존)
+    if len(re.sub(r"\s", "", t2)) >= 2:          # 전부 지워졌으면 되돌림 (빈 canon 방지)
+        t = t2
+    t = _NIM_STRIP_RE.sub(r"\1", t)              # 카조에님 → 카조에 (이름은 보존)
+    t = re.sub(r"[^0-9a-z가-힣.~/]", "", t)       # 공백·문장부호 제거
+    t = re.sub(r"(?<![0-9])[.~/]|[.~/](?![0-9])", "", t)  # 숫자 사이 아닌 . ~ / 제거
+    changed = True
+    while changed:                               # 꼬리 필러: "모델링작업중"→"모델링"
+        changed = False
+        for suf in _TRAIL:
+            if t.endswith(suf) and len(t) - len(suf) >= 2:
+                t = t[:-len(suf)]
+                changed = True
+    return t
+
+
+SNAP_HINT_RE = re.compile(r"^\s*[\[\(#*•\-~<【]*\s*전체\s*일정\s*[\]\)>:#*~】]*\s*$", re.M)
+SNAP_BODY_MAX = 1200      # 스냅샷 본문 절단 한도 (bot이 절단 여부 판정에도 사용)
+
+SAME_TASK_PROMPT = (
+    "한 작업자의 '기존 작업 목록'과 '새로 보고된 작업' 하나가 있다.\n"
+    "새 작업이 기존 목록 중 하나와 같은 작업인지 판정해라.\n"
+    "같은 작업 = 표현·어순·꾸밈말만 다르고 실제로는 동일한 일.\n"
+    "대상 인물이 다르거나, 부위·단계·차수·계절 등 실체가 다르면 다른 작업이다.\n"
+    "출력(JSON만): {\"번호\": n} — 같은 작업의 번호. 없거나 확실하지 않으면 0.\n\n"
+    "예시1)\n기존 작업 목록:\n1. 강님 명함 인쇄\n2. 하늘님 로고 시안\n"
+    "새로 보고된 작업: 하늘님 로고시안 제작\n-> {\"번호\": 2}\n\n"
+    "예시2)\n기존 작업 목록:\n1. 구름님 포스터 앞면\n"
+    "새로 보고된 작업: 구름님 포스터 뒷면\n-> {\"번호\": 0}\n\n"
+    "예시3)\n기존 작업 목록:\n1. 별님 채색\n2. 눈님 표지\n3. 강님 배너 수정 보조\n"
+    "새로 보고된 작업: 강님 홈페이지용 배너 수정\n-> {\"번호\": 3}\n\n"
+    "예시4)\n기존 작업 목록:\n1. 눈님 여름 카드\n"
+    "새로 보고된 작업: 눈님 겨울 카드\n-> {\"번호\": 0}\n\n"
+    "예시5)\n기존 작업 목록:\n1. 별님 1차 시안\n"
+    "새로 보고된 작업: 별님 2차 시안\n-> {\"번호\": 0}\n\n")
+_PICK_SCHEMA = {"type": "object",
+                "properties": {"번호": {"type": "integer"}},
+                "required": ["번호"]}
+
+
+def _pick_idx(out, n):
+    """{'번호': k} → 1..n | 그 외 None. (0 = 해당없음/새작업)"""
+    k = _json_or(out, {}).get("번호")
+    if isinstance(k, int) and 1 <= k <= n:
+        return k
+    return None
+
+
+def _core_task(t):
+    """인물(OO님) 제거 후 canon — 작업 실체 비교용."""
+    return canon(NIM_RE.sub("", t or ""))
+
+
+def _bigrams(s):
+    return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) >= 2 else ({s} if s else set())
+
+
+def _core_sim_ok(a, b):
+    """LLM '같다' 판정의 결정적 백스톱 — 핵심 글자 겹침이 전혀 없으면 기각(리깅≠의상)."""
+    if not a or not b:
+        return True                            # 판단 불가 → LLM 존중
+    ba, bb = _bigrams(a), _bigrams(b)
+    return len(ba & bb) / max(1, min(len(ba), len(bb))) > 0.34
+
+
+def match_task(candidates, new_task):
+    """candidates: [{'canon','task'}] 순서 유지. 반환 인덱스|None(새 행).
+    ollama 전송 실패는 전파 — 호출부가 스냅샷 diff 전체 중단."""
+    if not candidates:
+        return None
+    nc = canon(new_task)
+    if nc:
+        hits = [i for i, c in enumerate(candidates)
+                if c.get("canon") and c["canon"] == nc]
+        if len(hits) == 1:
+            return hits[0]                     # 1단: 유일 완전일치만
+    # 인물 선필터(결정적): 새 작업에 'OO님'이 있으면 같은 인물 후보만 → 오답 공간 축소
+    pool = list(range(len(candidates)))
+    nm = nim_in(new_task or "")
+    if nm:
+        same = [i for i in pool if nm in (candidates[i].get("task") or "")]
+        if same:
+            pool = same
+    # 포함 fast-path(결정적): 이름 뗀 핵심이 포함관계(≥4자)로 유일하면 LLM 생략 ("바디수정"⊂"작캠용 바디 수정 도움")
+    core_new = _core_task(new_task)
+    if len(core_new) >= 4:
+        sub = [i for i in pool
+               if (lambda cb: cb and (core_new in cb or cb in core_new)
+                   and min(len(core_new), len(cb)) >= 4)(_core_task(candidates[i].get("task")))]
+        if len(sub) == 1:
+            return sub[0]
+    cand_lines = "\n".join(
+        f"{k + 1}. {(candidates[i].get('task') or '')[:60]}" for k, i in enumerate(pool))
+    out = ollama(SAME_TASK_PROMPT
+                 + f"기존 작업 목록:\n{cand_lines}\n새로 보고된 작업: {(new_task or '')[:60]}\n->\n",
+                 _PICK_SCHEMA)
+    r = _pick_idx(out, len(pool))
+    if r is not None:
+        pick = pool[r - 1]
+        if not _core_sim_ok(core_new, _core_task(candidates[pick].get("task"))):
+            return None                        # 글자 겹침 0 = 실체 다름 → 오병합 기각
+        return pick
+    return None
+
+
+def match_snapshot(candidates, new_tasks):
+    """1:1 선점 매칭. 반환: [cand_index|None] (new_tasks와 같은 길이). 예외는 전파."""
+    result = [None] * len(new_tasks)
+    claimed = set()
+    canons = [canon(t) for t in new_tasks]
+    by_canon = {}
+    for i, c in enumerate(candidates):
+        by_canon.setdefault(c.get("canon") or "", []).append(i)
+    dup_new = {c for c in canons if c and canons.count(c) > 1}
+    for j, nc in enumerate(canons):            # 1단: 양쪽 유일할 때만 선점
+        if not nc or nc in dup_new:
+            continue
+        hits = [i for i in by_canon.get(nc, []) if i not in claimed]
+        if len(hits) == 1:
+            result[j] = hits[0]
+            claimed.add(hits[0])
+    for j in range(len(new_tasks)):            # 2단: 남은 항목 × 남은 후보 (메시지 순 = 결정적)
+        if result[j] is not None:
+            continue
+        remain = [i for i in range(len(candidates)) if i not in claimed]
+        if not remain:
+            break
+        r = match_task([candidates[i] for i in remain], new_tasks[j])
+        if r is not None:
+            result[j] = remain[r]
+            claimed.add(remain[r])
+    return result
+
+
+def _is_progline(it):
+    """날짜 없음 + (진행 문구 or 완료) = 진행 보고 줄."""
+    return (not it.get("날짜")) and (bool(it.get("진행내용")) or it.get("상태") == "완료")
+
+
+def merge_snapshot_items(items):
+    """canon 동일 그룹에서 '진행줄'만 날짜 있는 항목에 흡수. 날짜 있는 canon 쌍둥이는 별개 유지.
+    진행줄끼리(둘 다 날짜 없음)는 첫 항목에 합침."""
+    out = []
+    by_canon = {}
+    for it in items:
+        it = dict(it)
+        k = canon(it.get("작업내용", ""))
+        group = by_canon.get(k, []) if k else []
+        target = None
+        if group:
+            if _is_progline(it):
+                target = group[0]                       # 진행줄 → 같은 canon의 앞 항목에 흡수
+            else:
+                proglines = [g for g in group if _is_progline(g)]
+                if proglines:
+                    target = proglines[0]               # 앞서 나온 진행줄에 날짜 항목을 얹음
+        if target is None:
+            out.append(it)
+            if k:
+                by_canon.setdefault(k, []).append(it)
+            continue
+        if not target.get("날짜") and it.get("날짜"):
+            target["날짜"] = it["날짜"]
+        if it.get("진행내용") and not target.get("진행내용"):
+            target["진행내용"] = it["진행내용"]
+        if "완료" in (target.get("상태"), it.get("상태")):
+            target["상태"] = "완료"
+        elif it.get("날짜"):
+            target["상태"] = it.get("상태") or target.get("상태")
+    return out
+
+
+REPLY_ROUTE_PROMPT = (
+    "한 작업자의 '작업 목록'과, 그 작업자가 보낸 '답장'이 있다.\n"
+    "답장이 어느 작업에 대한 것인지 판정해라.\n"
+    "출력(JSON만): {\"번호\": n} — 작업 하나면 그 번호, "
+    "목록 전체에 대한 것이면(다/전부/모두/싹 등) 0, 알 수 없으면 -1.\n\n"
+    "예시1)\n작업 목록:\n1. 강님 명함 인쇄\n2. 하늘님 로고 시안\n"
+    "답장: 로고 반쯤 그렸어요\n-> {\"번호\": 2}\n\n"
+    "예시2)\n작업 목록:\n1. 강님 명함 인쇄\n2. 하늘님 로고 시안\n"
+    "답장: 둘 다 끝냈습니다\n-> {\"번호\": 0}\n\n"
+    "예시3)\n작업 목록:\n1. 강님 명함 인쇄\n2. 하늘님 로고 시안\n"
+    "답장: 오늘 우체국 다녀올게요\n-> {\"번호\": -1}\n\n")
+
+
+def route_reply(candidates, text):
+    """스냅샷 답장 → ('one', idx) | ('all', None) | ('none', None). 전송 실패는 전파."""
+    if not candidates:
+        return ("none", None)
+    if len(candidates) == 1:
+        return ("one", 0)                      # 후보 1개면 LLM 생략
+    cand_lines = "\n".join(
+        f"{i + 1}. {(c.get('task') or '')[:60]}" for i, c in enumerate(candidates))
+    out = ollama(REPLY_ROUTE_PROMPT
+                 + f"작업 목록:\n{cand_lines}\n답장: {(text or '')[:200]}\n->\n",
+                 _PICK_SCHEMA)
+    k = _json_or(out, {}).get("번호")
+    if isinstance(k, int) and 1 <= k <= len(candidates):
+        return ("one", k - 1)
+    if k == 0:
+        return ("all", None)
+    return ("none", None)
 
 
 def review(content, who, client, reason):
@@ -288,27 +707,28 @@ def review(content, who, client, reason):
 
 
 def analyze(content, channel_name, author, mentions, context):
-    text = (content or "")[:400]
+    snap = bool(SNAP_HINT_RE.search(content or ""))                  # 스냅샷 힌트 선판정
+    text = (content or "")[:SNAP_BODY_MAX if snap else 400]          # 스냅샷은 본문 컷 확장
     if len(text) < 3:
         return None
 
     # 정산 우선
     if has(text, config.MONEY_HINTS):
-        out = ollama(SETTLE_PROMPT.format(m=text))
-        if "|" in out and not out.startswith("없음"):
-            p = [x.strip() for x in out.split("|")] + ["", "", ""]
+        st = extract_settle(text)
+        if st is not None:
             who = mentions[0] if mentions else author
-            if not p[0] or p[0] in LABELS:                 # 라벨 echo = 추출 실패
+            if not st["항목"]:                             # 빈 항목/라벨 echo = 추출 실패
                 return review(content, who, nim_in(content), "정산 추출 실패(형식 불명확)")
             recv = nim_in(content) or who
             return {"tab": "정산", "fields": {
-                "받는이": recv, "항목": p[0], "금액": norm_amount(p[1]),
-                "상태": norm_settle_status(p[2])}}
+                "받는이": recv, "항목": st["항목"], "금액": st["금액"],
+                "상태": st["상태"]}}
 
-    # 일정/작업 (멀티화: 0..N건)
-    if has(text, config.DATE_HINTS):
-        out = ollama(DEADLINE_PROMPT.format(m=text))
-        rows = parse_deadline_lines(out)          # 0..N건
+    # 일정/작업 (멀티화: 0..N건) — 스냅샷 헤더도 일정 신호로 인정
+    if has(text, config.DATE_HINTS) or snap:
+        rows = parse_structured_snapshot(text) if snap else None   # 구조화 전체일정은 결정적 파싱 우선
+        if rows is None:
+            rows = extract_deadline(text)                  # 0..N건
         if not rows:
             return None                           # 신호는 있었으나 0건 → None
 
@@ -320,8 +740,8 @@ def analyze(content, channel_name, author, mentions, context):
         if not worker:
             return review(content, who, client, "작업자 불명확")
 
-        # 보수 모드: 10건 초과는 과분할/환각 의심 → 확인필요 회송
-        if len(rows) > 10:
+        # 보수 모드: 상한 초과는 과분할/환각 의심 → 확인필요 회송 (스냅샷은 25)
+        if len(rows) > (25 if snap else 10):
             return review(content, who, client, f"일정 과다추출({len(rows)}건) — 확인 요망")
 
         items = []
@@ -331,6 +751,7 @@ def analyze(content, channel_name, author, mentions, context):
                 "작업내용": r["작업내용"],
                 "진행내용": r["진행"],            # 빈 문자열 가능 (빈값이면 bot이 키 생략/빈칸)
                 "담당자": worker,
+                "의뢰자": nim_in(r["작업내용"]) or client,   # ⑫ 항목별 "@@님" 우선(다중 의뢰자 리스트 대응), 없으면 메시지 의뢰자
                 "상태": detect_status(r["진행"]),
             })
         return {"tab": "일정", "is_task": True, "items": items}
