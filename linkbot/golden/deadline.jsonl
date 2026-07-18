@@ -1,0 +1,14 @@
+# 일정 추출 골든셋 — analyze() 일정 경로. 가상 이름만(실제 시트 데이터 아님).
+# 필드: name, msg, channel, author, mentions[], context[], expect_tab(일정|확인필요|null), items[]
+#   item: {"task_has":부분문자열, "date":정확일치 | "date_ymd":true(형식만) | (생략=날짜 무시)}
+#   date의 "{Y}"는 러너가 실행 연도로 치환(norm_date가 today.year 기준이라 연도부패 방지).
+{"name": "단일 모델링", "msg": "마태자님 캐릭터 모델링 7/15까지", "channel": "마태자-일정정리", "author": "마태자", "mentions": [], "context": [], "expect_tab": "일정", "items": [{"task_has": "모델링", "date": "{Y}-07-15"}]}
+{"name": "다중 2건", "msg": "롤리님 모델링 7/20까지, 의상 7/25까지", "channel": "롤리-일정정리", "author": "롤리", "mentions": [], "context": [], "expect_tab": "일정", "items": [{"task_has": "모델링", "date": "{Y}-07-20"}, {"task_has": "의상", "date": "{Y}-07-25"}]}
+{"name": "월일 한글", "msg": "키키님 헤어 12월 30일까지 해주세요", "channel": "키키-일정정리", "author": "키키", "mentions": [], "context": [], "expect_tab": "일정", "items": [{"task_has": "헤어", "date": "{Y}-12-30"}]}
+{"name": "범위 날짜", "msg": "카조에님 리깅 6/27~8/15 진행", "channel": "카조에-일정정리", "author": "카조에", "mentions": [], "context": [], "expect_tab": "일정", "items": [{"task_has": "리깅", "date": "{Y}-06-27 ~ {Y}-08-15"}]}
+{"name": "미상 날짜 N/?", "msg": "다시바님 헤드 8/? 예정", "channel": "다시바-일정정리", "author": "다시바", "mentions": [], "context": [], "expect_tab": "일정", "items": [{"task_has": "헤드", "date": "{Y}-08-??"}]}
+{"name": "상대 내일", "msg": "뿌요님 채색 내일까지 마무리", "channel": "뿌요-일정정리", "author": "뿌요", "mentions": [], "context": [], "expect_tab": "일정", "items": [{"task_has": "채색", "date_ymd": true}]}
+{"name": "애매 중순 유지", "msg": "권민님 바디 수정 7월 중순쯤", "channel": "권민-일정정리", "author": "권민", "mentions": [], "context": [], "expect_tab": "일정", "items": [{"task_has": "바디"}]}
+{"name": "이름유지 b안", "msg": "롤리님 오리지널 헤드 작업 7/30까지", "channel": "마태자-일정정리", "author": "마태자", "mentions": [], "context": [], "expect_tab": "일정", "items": [{"task_has": "헤드", "date": "{Y}-07-30"}]}
+{"name": "작업자불명 회송", "msg": "모델링 7/20까지 부탁해요", "channel": "공지사항", "author": "관리자", "mentions": [], "context": [], "expect_tab": "확인필요", "items": []}
+{"name": "잡담 무시", "msg": "오늘 점심 뭐 먹지 ㅎㅎ", "channel": "잡담", "author": "철수", "mentions": [], "context": [], "expect_tab": null, "items": []}

@@ -14,7 +14,7 @@ def push(sheet, items, mode="upsert"):
         config.WEBHOOK_URL, data=body,
         headers={"Content-Type": "application/json; charset=utf-8"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with urllib.request.urlopen(req, timeout=90) as r:      # GAS 콜드스타트/락 대기 대응 (구 30s는 부족)
             return r.read().decode("utf-8", "replace")
     except Exception as e:
         return f"err:{e}"
@@ -24,7 +24,7 @@ def fetch(sheet):
     """doGet으로 탭 읽기. 성공: rows 리스트, 실패: {'err':..}"""
     url = config.WEBHOOK_URL + "?sheet=" + urllib.parse.quote(sheet)
     try:
-        with urllib.request.urlopen(url, timeout=30) as r:
+        with urllib.request.urlopen(url, timeout=120) as r:     # doGet은 콜드스타트+락으로 최대 ~74s 관측 → 120s
             data = json.loads(r.read().decode("utf-8", "replace"))
         if not isinstance(data, dict) or not data.get("ok"):
             return {"err": (data.get("error") if isinstance(data, dict) else "bad-json")}
@@ -42,7 +42,7 @@ def delete_rows(sheet, keys):
     req = urllib.request.Request(config.WEBHOOK_URL, data=body,
                                  headers={"Content-Type": "application/json; charset=utf-8"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with urllib.request.urlopen(req, timeout=90) as r:      # 삭제도 락 직렬화라 느릴 수 있음 → 90s
             return r.read().decode("utf-8", "replace")
     except Exception as e:
         return f"err:{e}"

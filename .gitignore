@@ -17,6 +17,9 @@ data/
 # 분석 리포트 (서버 멤버 데이터 포함 — 로컬 전용)
 analysis/report*.md
 
+# 골든셋 로컬 확장 (실서버 메시지 포함 — 로컬 전용, 커밋 금지)
+linkbot/golden/local_*
+
 # 추출 결과/상태 (서버 데이터 — 로컬 전용)
 extract/*.csv
 extract/_summary.txt

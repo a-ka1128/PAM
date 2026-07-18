@@ -1,0 +1,8 @@
+# 스냅샷 동일작업 매칭 골든셋 — match_task(candidates, query). 가상 이름만.
+# 필드: name, candidates[](작업명 문자열), query, expect(정수 index | "new")
+{"name": "같은 사람 같은 작업", "candidates": ["카조에님 오리지널 의상", "다시바님 헤드"], "query": "카조에님 오리지널 의상 컬러 수정", "expect": 0}
+{"name": "두번째 후보 매칭", "candidates": ["카조에님 오리지널 의상", "다시바님 헤드"], "query": "다시바님 헤드 리터치", "expect": 1}
+{"name": "완전 새 작업", "candidates": ["카조에님 오리지널 의상", "다시바님 헤드"], "query": "뿌요님 배경 일러스트", "expect": "new"}
+{"name": "계절 구분(여름≠겨울)", "candidates": ["뿌요님 여름 의상", "뿌요님 겨울 의상"], "query": "뿌요님 여름 의상 컬러 수정", "expect": 0}
+{"name": "같은사람 다른작업 기각", "candidates": ["카조에님 오리지널 의상"], "query": "카조에님 리깅 작업", "expect": "new"}
+{"name": "차수 구분(1차≠2차)", "candidates": ["롤리님 채색 1차", "롤리님 채색 2차"], "query": "롤리님 채색 2차 마무리", "expect": 1}

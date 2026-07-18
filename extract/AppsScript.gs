@@ -7,7 +7,7 @@
 //                  { "sheet":"확인필요", "action":"delete", "keys":["<msg.id>", ...] }
 // =========================================================
 var TABS = {
-  "일정":     ["날짜", "작업내용", "진행내용", "담당자", "상태", "D-day", "원본"],
+  "일정":     ["날짜", "작업내용", "진행내용", "담당자", "의뢰자", "상태", "D-day", "원본"],
   "정산":     ["받는이", "항목", "금액", "상태", "원본"],
   "확인필요": ["내용", "추정 작업자", "추정 의뢰자", "사유", "원본", "처리"]
 };
@@ -73,7 +73,7 @@ function doPost(e) {
       } else if (!exists && dt >= 0) {
         sh.getRange(row, dt + 1).setValue("");                        // 신규+날짜없음=빈칸
       }
-      if (dd >= 0 && dt >= 0) { var a1 = sh.getRange(row, dt + 1).getA1Notation(); sh.getRange(row, dd + 1).setFormula('=IF(ISNUMBER(' + a1 + '),' + a1 + '-TODAY(),"")'); }
+      if (dd >= 0 && dt >= 0) { var a1 = sh.getRange(row, dt + 1).getA1Notation(); sh.getRange(row, dd + 1).setFormula('=IF(ISNUMBER(' + a1 + '),' + a1 + '-TODAY(),IFERROR(DATEVALUE(TRIM(MID(' + a1 + ',FIND("~",' + a1 + ')+1,50)))-TODAY(),""))'); }
 
       var am = head.indexOf("금액");
       if (am >= 0 && f["금액"] !== undefined && String(f["금액"]).trim() !== "") { var num = parseInt(String(f["금액"]).replace(/[^0-9]/g, "")); if (!isNaN(num)) sh.getRange(row, am + 1).setValue(num).setNumberFormat("#,##0"); }
@@ -86,11 +86,13 @@ function doPost(e) {
   } finally { lock.releaseLock(); }
 }
 
-// 확인필요 탭 → JSON (원본 URL은 HYPERLINK 수식이라 getFormulas로 추출)
+// 확인필요/일정 탭 → JSON (원본 URL은 HYPERLINK 수식이라 getFormulas로 추출)
+//   확인필요: 봇이 처리(등록/무시) 읽어감.  일정: 리마인더봇 아침 다이제스트용(읽기 전용).
+var READ_ALLOWED = { "확인필요": true, "일정": true };
 function doGet(e) {
   var name = (e && e.parameter && e.parameter.sheet) || "확인필요";
   var out = { ok: true, sheet: name, rows: [] };
-  if (name !== "확인필요") { out.ok = false; out.error = "not allowed"; return _json(out); }
+  if (!READ_ALLOWED[name]) { out.ok = false; out.error = "not allowed"; return _json(out); }
   var head = TABS[name];
   var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
   if (!sh) return _json(out);
@@ -100,28 +102,36 @@ function doGet(e) {
   var lock = LockService.getScriptLock();
   try { lock.waitLock(20000); } catch (err) { out.ok = false; out.error = "locked"; return _json(out); }
   try {
-    var vals = sh.getRange(2, 1, last - 1, keyCol).getValues();
     var iSrc = head.indexOf("원본");
     var forms = (iSrc >= 0) ? sh.getRange(2, iSrc + 1, last - 1, 1).getFormulas() : null;
-    var iC = head.indexOf("내용"), iW = head.indexOf("추정 작업자"),
-        iR = head.indexOf("추정 의뢰자"), iRe = head.indexOf("사유"), iP = head.indexOf("처리");
-    for (var r = 0; r < vals.length; r++) {
-      var row = vals[r], key = row[keyCol - 1];
-      if (key === "" || key === null) continue;
-      var link = "";
-      if (forms) {
-        var m = String(forms[r][0] || "").match(/HYPERLINK\("([^"]+)"/i);
-        if (m) link = m[1];
+    if (name === "확인필요") {
+      var vals = sh.getRange(2, 1, last - 1, keyCol).getValues();
+      var iC = head.indexOf("내용"), iW = head.indexOf("추정 작업자"),
+          iR = head.indexOf("추정 의뢰자"), iRe = head.indexOf("사유"), iP = head.indexOf("처리");
+      for (var r = 0; r < vals.length; r++) {
+        var row = vals[r], key = row[keyCol - 1];
+        if (key === "" || key === null) continue;
+        var link = "";
+        if (forms) { var m = String(forms[r][0] || "").match(/HYPERLINK\("([^"]+)"/i); if (m) link = m[1]; }
+        out.rows.push({
+          key: String(key),
+          "내용": String(row[iC] || ""), "추정작업자": String(row[iW] || ""),
+          "추정의뢰자": String(row[iR] || ""), "사유": String(row[iRe] || ""),
+          "처리": String(row[iP] || ""), "원본링크": link
+        });
       }
-      out.rows.push({
-        key: String(key),
-        "내용": String(row[iC] || ""),
-        "추정작업자": String(row[iW] || ""),
-        "추정의뢰자": String(row[iR] || ""),
-        "사유": String(row[iRe] || ""),
-        "처리": String(row[iP] || ""),
-        "원본링크": link
-      });
+    } else {
+      // 일정 — 표시값(getDisplayValues)으로 읽어 Date의 UTC 직렬화 밀림을 원천 차단("2026-07-15" 문자열 그대로).
+      var disp = sh.getRange(2, 1, last - 1, keyCol).getDisplayValues();
+      for (var r2 = 0; r2 < disp.length; r2++) {
+        var row2 = disp[r2], key2 = row2[keyCol - 1];
+        if (key2 === "" || key2 === null) continue;
+        var link2 = "";
+        if (forms) { var m2 = String(forms[r2][0] || "").match(/HYPERLINK\("([^"]+)"/i); if (m2) link2 = m2[1]; }
+        var o = { key: String(key2), "원본링크": link2 };
+        for (var c = 0; c < head.length; c++) { if (head[c] === "원본") continue; o[head[c]] = String(row2[c] || ""); }
+        out.rows.push(o);
+      }
     }
   } finally { lock.releaseLock(); }
   return _json(out);
@@ -162,7 +172,7 @@ function initTab(sh, name, head, keyCol) {
   sh.getRange(1, 1, 1, head.length).setValues([head])
     .setBackground("#34495e").setFontColor("#ffffff").setFontWeight("bold").setHorizontalAlignment("center");
   sh.setRowHeight(1, 28); sh.setFrozenRows(1);
-  var W = { "날짜": 100, "작업내용": 240, "진행내용": 220, "담당자": 140, "상태": 92, "D-day": 70, "원본": 64, "받는이": 110, "항목": 220, "금액": 100, "내용": 300, "추정 작업자": 110, "추정 의뢰자": 110, "사유": 170, "처리": 92 };
+  var W = { "날짜": 100, "작업내용": 240, "진행내용": 220, "담당자": 140, "의뢰자": 110, "상태": 92, "D-day": 70, "원본": 64, "받는이": 110, "항목": 220, "금액": 100, "내용": 300, "추정 작업자": 110, "추정 의뢰자": 110, "사유": 170, "처리": 92 };
   for (var i = 0; i < head.length; i++) sh.setColumnWidth(i + 1, W[head[i]] || 120);
   sh.getRange(1, keyCol).setValue("_key"); sh.hideColumns(keyCol);
   sh.getRange(2, 1, 5000, head.length).clearDataValidations();   // 잔존 드롭다운 제거(재초기화·스키마변경 안전)
@@ -319,7 +329,7 @@ function resortSchedule() {
   if (ddi >= 0) {
     for (var i = 2; i <= last; i++) {
       var a1 = sh.getRange(i, dCol).getA1Notation();
-      sh.getRange(i, ddi + 1).setFormula('=IF(ISNUMBER(' + a1 + '),' + a1 + '-TODAY(),"")');
+      sh.getRange(i, ddi + 1).setFormula('=IF(ISNUMBER(' + a1 + '),' + a1 + '-TODAY(),IFERROR(DATEVALUE(TRIM(MID(' + a1 + ',FIND("~",' + a1 + ')+1,50)))-TODAY(),""))');
     }
   }
 }
@@ -370,12 +380,67 @@ function migrateScheduleV2() {
       var fml = (srcForms[i] && srcForms[i][0]) ? srcForms[i][0] : "";
       if (fml) sh.getRange(r, iSrc + 1).setFormula(fml);
       var a1 = sh.getRange(r, iDate + 1).getA1Notation();
-      sh.getRange(r, iDday + 1).setFormula('=IF(ISNUMBER(' + a1 + '),' + a1 + '-TODAY(),"")');
+      sh.getRange(r, iDday + 1).setFormula('=IF(ISNUMBER(' + a1 + '),' + a1 + '-TODAY(),IFERROR(DATEVALUE(TRIM(MID(' + a1 + ',FIND("~",' + a1 + ')+1,50)))-TODAY(),""))');
       sh.getRange(r, newKeyCol).setValue(newKey);
       r++;
     }
     resortSchedule();
     Logger.log("migrateScheduleV2: " + (r - 2) + "행 이전 완료");
+  } finally { lock.releaseLock(); }
+}
+
+// 기존 일정 탭 → 담당자 옆에 '의뢰자' 컬럼 삽입(기존행은 빈칸, going-forward). 멱등. 봇 정지 후 1회 실행.
+function migrateScheduleAddClient() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName("일정");
+  if (!sh) { Logger.log("일정 탭 없음"); return; }
+  var lock = LockService.getScriptLock(); lock.waitLock(30000);
+  try {
+    var h1 = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+    if (h1.indexOf("의뢰자") >= 0) { Logger.log("이미 의뢰자 컬럼 있음 — skip"); return; }
+    if (h1.indexOf("진행내용") < 0) { Logger.log("먼저 migrateScheduleV2 실행 필요"); return; }
+
+    var oldHead = ["날짜", "작업내용", "진행내용", "담당자", "상태", "D-day", "원본"];
+    var oldKeyCol = oldHead.length + 1;              // 8 = H
+    var last = sh.getLastRow();
+    var col = function (h) { return oldHead.indexOf(h) + 1; };
+    var keyVals  = (last >= 2) ? sh.getRange(2, oldKeyCol, last - 1, 1).getValues() : [];
+    var dateVals = (last >= 2) ? sh.getRange(2, col("날짜"), last - 1, 1).getValues() : [];
+    var workVals = (last >= 2) ? sh.getRange(2, col("작업내용"), last - 1, 1).getValues() : [];
+    var progVals = (last >= 2) ? sh.getRange(2, col("진행내용"), last - 1, 1).getValues() : [];
+    var ownerVals= (last >= 2) ? sh.getRange(2, col("담당자"), last - 1, 1).getValues() : [];
+    var statVals = (last >= 2) ? sh.getRange(2, col("상태"), last - 1, 1).getValues() : [];
+    var srcForms = (last >= 2) ? sh.getRange(2, col("원본"), last - 1, 1).getFormulas() : [];
+
+    sh.clear(); sh.clearConditionalFormatRules();
+    var newHead = TABS["일정"], newKeyCol = newHead.length + 1;   // 9 = I
+    initTab(sh, "일정", newHead, newKeyCol);
+
+    var iDate = newHead.indexOf("날짜"), iWork = newHead.indexOf("작업내용"),
+        iProg = newHead.indexOf("진행내용"), iOwner = newHead.indexOf("담당자"),
+        iClient = newHead.indexOf("의뢰자"), iStat = newHead.indexOf("상태"),
+        iDday = newHead.indexOf("D-day"), iSrc = newHead.indexOf("원본");
+    var r = 2;
+    for (var i = 0; i < keyVals.length; i++) {
+      var key = String(keyVals[i][0] || "");
+      if (!key) continue;
+      var dv = dateVals[i][0];
+      if (dv instanceof Date) sh.getRange(r, iDate + 1).setValue(dv).setNumberFormat("yyyy-mm-dd");
+      else if (dv !== "" && dv !== null) sh.getRange(r, iDate + 1).setValue(dv);
+      sh.getRange(r, iWork + 1).setValue(workVals[i][0] || "");
+      sh.getRange(r, iProg + 1).setValue(progVals[i][0] || "");
+      sh.getRange(r, iOwner + 1).setValue(ownerVals[i][0] || "");
+      sh.getRange(r, iClient + 1).setValue("");                    // 의뢰자 — 기존행 빈칸(going-forward)
+      sh.getRange(r, iStat + 1).setValue(statVals[i][0] || "진행중");
+      var fml = (srcForms[i] && srcForms[i][0]) ? srcForms[i][0] : "";
+      if (fml) sh.getRange(r, iSrc + 1).setFormula(fml);
+      var a1 = sh.getRange(r, iDate + 1).getA1Notation();
+      sh.getRange(r, iDday + 1).setFormula('=IF(ISNUMBER(' + a1 + '),' + a1 + '-TODAY(),IFERROR(DATEVALUE(TRIM(MID(' + a1 + ',FIND("~",' + a1 + ')+1,50)))-TODAY(),""))');
+      sh.getRange(r, newKeyCol).setValue(key);
+      r++;
+    }
+    resortSchedule();
+    Logger.log("migrateScheduleAddClient: " + (r - 2) + "행 이전 완료 (의뢰자 컬럼 추가)");
   } finally { lock.releaseLock(); }
 }
 

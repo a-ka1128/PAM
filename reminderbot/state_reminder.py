@@ -10,6 +10,8 @@ def _con():
     c.execute("CREATE TABLE IF NOT EXISTS tracked ("
               "mid INTEGER PRIMARY KEY, channel_id INTEGER, interval INTEGER, "
               "last REAL, author_id INTEGER, emoji TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS done_snap (rowkey TEXT PRIMARY KEY)")
     return c
 
 
@@ -30,3 +32,33 @@ def save_tracked(mid, t):
 
 def del_tracked(mid):
     c = _con(); c.execute("DELETE FROM tracked WHERE mid=?", (mid,)); c.commit(); c.close()
+
+
+# ── 다이제스트용 kv / 완료행 스냅샷 ─────────────────────────────
+def get_kv(k, default=None):
+    c = _con()
+    row = c.execute("SELECT v FROM kv WHERE k=?", (k,)).fetchone()
+    c.close()
+    return row[0] if row else default
+
+
+def set_kv(k, v):
+    c = _con()
+    c.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (k, str(v)))
+    c.commit(); c.close()
+
+
+def get_done_snapshot():
+    """어제(직전 브리핑 시점) '완료' 상태였던 행 _key 집합."""
+    c = _con()
+    rows = c.execute("SELECT rowkey FROM done_snap").fetchall()
+    c.close()
+    return set(r[0] for r in rows)
+
+
+def set_done_snapshot(keys):
+    """완료행 _key 집합을 통째로 교체(다음 브리핑의 기준선)."""
+    c = _con()
+    c.execute("DELETE FROM done_snap")
+    c.executemany("INSERT OR IGNORE INTO done_snap VALUES (?)", [(str(k),) for k in keys])
+    c.commit(); c.close()

@@ -17,3 +17,9 @@ DONE_EMOJI = "✅"
 
 # 재촉 루프 점검 주기(초)
 TICK_SECONDS = 60
+
+# ── 아침 다이제스트(PM 브리핑 DM) ──────────────────────────────
+#   추출봇 config.py 의 WEBHOOK_URL 과 동일한 Apps Script 웹앱 URL을 넣으면 활성화.
+#   비워두면 다이제스트만 자동 OFF(재촉 기능은 정상). 시트 '일정' 탭(파생 데이터)만 읽음.
+WEBHOOK_URL = "여기에_AppsScript_웹앱_URL_붙여넣기(추출봇과_동일)"
+DIGEST_HOUR = 9        # KST 몇 시 이후 첫 점검에 하루 1회 발송

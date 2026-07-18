@@ -1,0 +1,8 @@
+# 답장 라우팅 골든셋 — route_reply(candidates, reply). 가상 이름만.
+# 필드: name, candidates[](작업명), reply, expect_kind(one|all|none), expect_idx(one일 때만)
+{"name": "로고 하나 지목", "candidates": ["강님 명함 인쇄", "하늘님 로고 시안"], "reply": "로고 반쯤 그렸어요", "expect_kind": "one", "expect_idx": 1}
+{"name": "둘 다 완료=전체", "candidates": ["강님 명함 인쇄", "하늘님 로고 시안"], "reply": "둘 다 끝냈습니다", "expect_kind": "all"}
+{"name": "무관한 답장=모름", "candidates": ["강님 명함 인쇄", "하늘님 로고 시안"], "reply": "오늘 우체국 다녀올게요", "expect_kind": "none"}
+{"name": "후보 1개=LLM생략", "candidates": ["채색 1차"], "reply": "절반쯤 했어요", "expect_kind": "one", "expect_idx": 0}
+{"name": "3개 중 명함 지목", "candidates": ["명함 인쇄", "로고 시안", "배너 제작"], "reply": "명함 우체국 보냈어요", "expect_kind": "one", "expect_idx": 0}
+{"name": "3개 전부 완료", "candidates": ["명함 인쇄", "로고 시안", "배너 제작"], "reply": "전부 마무리했어요", "expect_kind": "all"}

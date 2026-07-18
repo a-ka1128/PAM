@@ -3,10 +3,13 @@
 #   간격 지나면 재촉 / ✅ → 해소 / 답장 → 타이머 리셋. 본문은 절대 읽지 않음(reference 메타만).
 import os
 import sys
+import re
 import time
 import socket
+import asyncio
 import logging
 import unicodedata
+from datetime import datetime, date, timezone, timedelta
 import discord
 from discord import app_commands
 from discord.ext import tasks
@@ -15,6 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import config_reminder as config
 import state_reminder as state
+import sheet_reader as sheet
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,7 +99,10 @@ async def on_ready():
         log.error("EXTRACTOR_BOT_USER_ID == self.id (전면 미동작)")
     if not reminder_tick.is_running():
         reminder_tick.start()
-    await alert(f"✅ 리마인더봇 시작 — 추적 {len(tracked)}건 복원")
+    if not digest_loop.is_running():
+        digest_loop.start()
+    await alert(f"✅ 리마인더봇 시작 — 추적 {len(tracked)}건 복원"
+                + (" · 다이제스트 ON" if config.WEBHOOK_URL else ""))
 
 
 @client.event
@@ -223,6 +230,139 @@ async def _before_tick():
     await client.wait_until_ready()
 
 
+# ── 아침 다이제스트(PM 브리핑 DM) ──────────────────────────────
+KST = timezone(timedelta(hours=9))
+_YMD = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+DIGEST_CAP = 12                       # 섹션당 나열 상한(초과분은 '…외 N건')
+
+
+def _parse_end_date(s):
+    """'2026-07-15' 또는 범위 '.. ~ 2026-08-15'의 끝날짜 → date. ??/중순 등 파싱불가 → None(마감/연체 제외)."""
+    s = (s or "").strip()
+    if not s:
+        return None
+    part = s.split("~")[-1].strip() if "~" in s else s     # 범위면 끝날짜 기준
+    m = _YMD.search(part)
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def build_digest():
+    """일정 탭(파생 데이터)만 읽어 순수 파이썬 집계. 반환 (text, 완료행_key집합) | (None, None)=읽기실패."""
+    rows = sheet.fetch("일정")
+    if isinstance(rows, dict):                              # {'err':..}
+        log.warning(f"다이제스트 시트 읽기 실패: {rows.get('err')}")
+        return None, None
+
+    today = datetime.now(KST).date()
+    overdue, soon, completed_now = [], [], set()
+    for row in rows:
+        st = (row.get("상태") or "").strip()
+        if st == "완료":
+            key = str(row.get("key") or "")
+            if key:
+                completed_now.add(key)
+            continue
+        d = _parse_end_date(row.get("날짜"))
+        if not d:
+            continue                                        # 애매/범위끝미상 → 마감·연체에서 제외
+        if d < today:
+            overdue.append((d, row))
+        elif (d - today).days <= 3:
+            soon.append((d, row))
+    overdue.sort(key=lambda x: x[0])
+    soon.sort(key=lambda x: x[0])
+
+    prev = state.get_done_snapshot()
+    initialized = state.get_kv("digest_init") == "1"
+    newly_done = len(completed_now - prev) if initialized else None     # 첫날은 기준선만
+
+    md = lambda dt: f"{dt.month}/{dt.day}"
+
+    def line(d, row, days_over=None):
+        task = (row.get("작업내용") or "").strip() or "(내용 없음)"
+        if len(task) > 300:                        # 과도한 붙여넣기 방어(가독성 + DM 페이로드 폭주 차단)
+            task = task[:300] + "…"
+        owner = (row.get("담당자") or "").strip()
+        who = f" (담당 {owner})" if owner else ""
+        link = (row.get("원본링크") or "").strip()
+        tail = f"  {link}" if link else ""
+        if days_over is not None:
+            return f" • {task}{who} — 마감 {md(d)}, {days_over}일 지남{tail}"
+        dd = (d - today).days
+        dlabel = "오늘(D-0)" if dd == 0 else f"{md(d)}(D-{dd})"
+        return f" • {task}{who} — {dlabel}{tail}"
+
+    parts = [f"🌅 룩플 아침 브리핑 ({md(today)})"]
+    if overdue:
+        parts.append(f"\n🔴 연체 {len(overdue)}건")
+        parts += [line(d, row, days_over=(today - d).days) for d, row in overdue[:DIGEST_CAP]]
+        if len(overdue) > DIGEST_CAP:
+            parts.append(f"   …외 {len(overdue) - DIGEST_CAP}건")
+    if soon:
+        parts.append(f"\n🟡 3일 내 마감 {len(soon)}건")
+        parts += [line(d, row) for d, row in soon[:DIGEST_CAP]]
+        if len(soon) > DIGEST_CAP:
+            parts.append(f"   …외 {len(soon) - DIGEST_CAP}건")
+    if not overdue and not soon:
+        parts.append("\n(임박/연체 일정 없음 — 여유롭네요 👍)")
+    parts.append("\n✅ 어제 완료: 집계 시작(내일부터 표시)" if newly_done is None
+                 else f"\n✅ 어제 완료 {newly_done}건")
+    return "\n".join(parts), completed_now
+
+
+async def _dm_long(user, text):
+    """DM 2000자 한도 대비 줄 단위 분할 전송. 한 줄이 한도 초과면 줄 내부까지 강제 슬라이스(400 방지)."""
+    LIMIT = 1900
+    buf = ""
+    for ln in text.split("\n"):
+        while len(ln) > LIMIT:                     # 한 줄 자체가 한도 초과 → 강제 분할
+            if buf:
+                await user.send(buf); buf = ""
+            await user.send(ln[:LIMIT]); ln = ln[LIMIT:]
+        if buf and len(buf) + len(ln) + 1 > LIMIT:
+            await user.send(buf); buf = ""
+        buf = (buf + "\n" + ln) if buf else ln
+    if buf:
+        await user.send(buf)
+
+
+@tasks.loop(minutes=5)
+async def digest_loop():
+    if not config.WEBHOOK_URL:
+        return
+    now = datetime.now(KST)
+    if now.hour < config.DIGEST_HOUR:
+        return
+    today = now.strftime("%Y-%m-%d")
+    if state.get_kv("last_digest_date") == today:          # 오늘 이미 발송
+        return
+    text, completed_now = await asyncio.to_thread(build_digest)
+    if completed_now is None:                              # 시트 읽기 실패 → 다음 tick 재시도(날짜 미기록)
+        return
+    try:
+        u = client.get_user(config.OWNER_ID) or await client.fetch_user(config.OWNER_ID)
+        if not u:
+            return
+        await _dm_long(u, text)
+    except Exception:
+        log.exception("다이제스트 DM 실패")
+        return                                             # 실패 시 스냅샷/날짜 미기록 → 재시도
+    state.set_done_snapshot(completed_now)                 # 기준선 갱신(다음 diff)
+    state.set_kv("digest_init", "1")
+    state.set_kv("last_digest_date", today)
+    log.info(f"다이제스트 발송 완료: {today} (연체/임박/완료 집계)")
+
+
+@digest_loop.before_loop
+async def _before_digest():
+    await client.wait_until_ready()
+
+
 @tree.command(name="추적목록", description="현재 재촉 중인 작업")
 async def list_cmd(inter: discord.Interaction):
     if not tracked:
@@ -245,8 +385,29 @@ async def untrack_cmd(inter: discord.Interaction, message_id: str):
 
 @tree.command(name="리마인더상태", description="리마인더봇 상태")
 async def status_cmd(inter: discord.Interaction):
+    dg = "ON" if config.WEBHOOK_URL else "OFF"
     await inter.response.send_message(
-        f"🟢 리마인더봇 가동 중 | 서버 {len(client.guilds)} | 추적 {len(tracked)}건", ephemeral=True)
+        f"🟢 리마인더봇 가동 중 | 서버 {len(client.guilds)} | 추적 {len(tracked)}건 | 다이제스트 {dg}",
+        ephemeral=True)
+
+
+@tree.command(name="브리핑", description="지금 아침 다이제스트 미리보기 DM (스케줄·기준선 미변경)")
+async def digest_now_cmd(inter: discord.Interaction):
+    if not config.WEBHOOK_URL:
+        await inter.response.send_message("다이제스트 미설정(config WEBHOOK_URL 비어있음).", ephemeral=True)
+        return
+    await inter.response.defer(ephemeral=True)
+    text, completed_now = await asyncio.to_thread(build_digest)
+    if completed_now is None:
+        await inter.followup.send("시트 읽기 실패 — reminder.log 확인.", ephemeral=True)
+        return
+    try:
+        u = client.get_user(config.OWNER_ID) or await client.fetch_user(config.OWNER_ID)
+        await _dm_long(u, text)                             # 미리보기: 스냅샷/날짜 저장 안 함
+        await inter.followup.send("DM으로 미리보기 보냈어요. (스케줄/기준선 그대로)", ephemeral=True)
+    except Exception:
+        log.exception("브리핑 미리보기 실패")
+        await inter.followup.send("DM 실패 — reminder.log 확인.", ephemeral=True)
 
 
 if __name__ == "__main__":
