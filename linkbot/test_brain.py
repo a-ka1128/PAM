@@ -86,6 +86,30 @@ check("구조화 전체일정 파싱(헤어 보존·부위 구분)",
       _ss is not None and len(_ss) == 4 and _ss[0]["작업내용"] == "희또 의상 삼면도"
       and _ss[3]["작업내용"] == "문모모 헤어" and _ss[1]["작업내용"] != _ss[2]["작업내용"], _ss)
 check("구조화 2줄미만 None(LLM폴백)", brain.parse_structured_snapshot("전체일정\n[7/8] 희또 작업 | 의상") is None, None)
+_sp = brain.parse_structured_snapshot(
+    "전체일정\n[7/19] 청백 윤이제 의상,헤어 완료\n"
+    "[7/20 ~ 7/21] - (룩플)솜주먹 세트\n"
+    "[7/22 ~ 7/25] -(개인) 위도2세트\n"
+    "[7/26 ~ 7/30] - (룩플)청백가요대전 5세트")
+check("구조화 파이프없는 형식(태그제거·꼬리완료)",
+      _sp is not None and len(_sp) == 4
+      and _sp[0]["작업내용"] == "청백 윤이제 의상,헤어" and _sp[0]["진행"] == "완료"
+      and _sp[1]["작업내용"] == "솜주먹 세트" and _sp[2]["작업내용"] == "위도2세트", _sp)
+check("구조화 날짜아닌 대괄호 무시",
+      brain.parse_structured_snapshot("전체일정\n[진행보고] 내용정리\n[메모] 기타사항") is None, None)
+_sl = brain.parse_structured_snapshot("전체일정\n[8/1~8/13] 문모모 작업ㅣ헤어\n[7/22~7/31] 카푸 작업ㅣ헤어")
+check("구조화 한글모음ㅣ 구분자", _sl is not None and _sl[0]["작업내용"] == "문모모 헤어"
+      and _sl[1]["작업내용"] == "카푸 헤어", _sl)
+
+_cm0 = brain._CLIENT_MAP
+brain._CLIENT_MAP = brain._parse_client_lines(
+    ["미미짱짱세용", "카푸", "청백", "청백가요제=청백", "청백가요대전=청백"])
+check("client 토큰 일치", brain.client_from_task("미미짱짱세용 오리지널 작업") == "미미짱짱세용", None)
+check("client 별칭→정규명", brain.client_from_task("청백가요제 2벌") == "청백", None)
+check("client 접두일치(3자+)", brain.client_from_task("청백가요대전2 백팀 4인") == "청백", None)
+check("client 무매치 빈칸", brain.client_from_task("의상 모델링 작업") == "", None)
+check("client 부분문자열 오탐 방지", brain.client_from_task("카푸치노 굿즈") == "", None)
+brain._CLIENT_MAP = _cm0
 
 print("[1.5] snapshot pure functions (no LLM)")
 check("canon 님/공백/꼬리 제거", brain.canon("뿌요님 여름 의상 작업") == brain.canon("뿌요 여름의상"), brain.canon("뿌요님 여름 의상 작업"))
@@ -96,6 +120,7 @@ check("canon 식별괄호 보존(구분)", brain.canon("개인일정 (뮤 헤어
 check("canon 식별괄호 vs 무괄호 구분", brain.canon("개인일정 (뮤 헤어 5종)") != brain.canon("개인일정"), None)
 check("canon 부위 괄호 구분", brain.canon("유화유화 작업") != brain.canon("유화유화 작업 (오리지널헤드)"), None)
 check("canon 날짜괄호 무시", brain.canon("의상 (6/28~7/15)") == brain.canon("의상"), brain.canon("의상 (6/28~7/15)"))
+check("canon 룩플태그 무시", brain.canon("(룩플)솜주먹 세트") == brain.canon("솜주먹 세트"), brain.canon("(룩플)솜주먹 세트"))
 check("canon 머리불릿 무관", brain.canon("- 구슬요 오리지널 의상") == brain.canon("구슬요 오리지널 의상"), None)
 check("find_client 본문우선", brain.find_client("빈즈님 모델링", ["딴사람님 잡담"]) == "빈즈", None)
 check("find_client context 무시", brain.find_client("모델링 작업", ["요나일님 딴작업"]) == "", brain.find_client("모델링 작업", ["요나일님 딴작업"]))

@@ -590,7 +590,8 @@ def _reextract_task(content):
     if not rows:
         return None
     items = [{"날짜": brain.norm_date(r["기한"]), "작업내용": r["작업내용"],
-              "진행내용": r["진행"], "의뢰자": brain.nim_in(r["작업내용"]),   # 항목별 "@@님"
+              "진행내용": r["진행"],   # 항목별 "@@님" → 의뢰자 사전 폴백 (analyze와 대칭)
+              "의뢰자": brain.nim_in(r["작업내용"]) or brain.client_from_task(r["작업내용"]),
               "상태": brain.detect_status(r["진행"])} for r in rows]
     return ("일정", items)     # items 리스트 반환
 

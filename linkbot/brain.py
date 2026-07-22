@@ -1,9 +1,11 @@
 # linkbot/brain.py — 메시지 1건 분석 → {tab, fields, is_task} or None
 #   추출 두뇌: 사전필터 → exaone+few-shot → 정규화 → 작업자/의뢰자 판별 → 탭 분류
+import os
 import re
 import json
 import time
 import datetime
+import threading
 import unicodedata
 import urllib.request
 import config
@@ -96,6 +98,14 @@ SETTLE_SCHEMA = {
 _THINK_OFF_PREFIXES = ("qwen3", "deepseek-r1", "magistral")
 
 
+# 여러 메시지가 동시에 들어오면(다중 채널 활동, catchup 등) analyze()가 스레드풀에서 병렬로
+#   ollama()를 호출한다 — GPU 1장·14B 모델은 동시요청을 못 받고 서버 큐에서 줄서다 각자의
+#   120s 타임아웃을 넘겨버림(실측: 로그에 수 초 간격 TimeoutError 뭉치로 확인됨).
+#   요청을 우리 쪽에서 한 번에 하나씩만 내보내면 대기는 이 락에서 하고, 타임아웃 시계는
+#   실제로 실행될 때만 돌아 개별 요청은 정상적으로 120s 안에 끝난다.
+_OLLAMA_LOCK = threading.Lock()
+
+
 def ollama(prompt, schema=None):
     payload = {"model": config.MODEL, "prompt": prompt, "stream": False,
                "keep_alive": "30m",  # 모델을 30분 메모리에 유지 → 재로드 지연 방지
@@ -106,15 +116,16 @@ def ollama(prompt, schema=None):
         payload["think"] = False
     body = json.dumps(payload).encode("utf-8")
     last = None
-    for attempt in range(2):              # 일시 멈칫 자동 복구 (최대 2회 시도)
-        try:
-            req = urllib.request.Request(config.OLLAMA, data=body, headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=120) as r:
-                return json.loads(r.read()).get("response", "").strip()
-        except Exception as e:
-            last = e
-            if attempt == 0:
-                time.sleep(3)             # 잠깐 쉬고 한 번 더
+    with _OLLAMA_LOCK:
+        for attempt in range(2):          # 일시 멈칫 자동 복구 (최대 2회 시도)
+            try:
+                req = urllib.request.Request(config.OLLAMA, data=body, headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    return json.loads(r.read()).get("response", "").strip()
+            except Exception as e:
+                last = e
+                if attempt == 0:
+                    time.sleep(3)         # 잠깐 쉬고 한 번 더
     raise last
 
 
@@ -298,6 +309,57 @@ def find_client(content, context=None):
     return nim_in(content)
 
 
+# ═══════════ 의뢰자 사전 — PM 교정값의 결정적 재사용 (능동학습 ⑩의 수동승인 형태) ═══════════
+#   golden/local_clients.txt (gitignored): 한 줄 = 의뢰자명, 또는 '별칭=의뢰자' (예: 청백가요제=청백).
+#   PM이 시트에서 직접 교정/승인한 이름만 사람 손으로 추가한다 — 자동 축적 금지(결정성 원칙).
+#   'OO님' 없이 이름만 쓰인 작업명("카푸 작업", "미미짱짱세용 오리지널")에서 의뢰자를 채우는 폴백.
+_CLIENTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden", "local_clients.txt")
+_TOKEN_SPLIT_RE = re.compile(r"[^0-9a-z가-힣]+")
+
+
+def _parse_client_lines(lines):
+    m = {}
+    for ln in lines:
+        ln = ln.split("#", 1)[0].strip()
+        if not ln:
+            continue
+        alias, _, name = ln.partition("=")
+        key = unicodedata.normalize("NFKC", re.sub(r"\s+", "", alias)).lower()
+        if key:
+            m[key] = (name.strip() or alias.strip())
+    return m
+
+
+def reload_clients():
+    global _CLIENT_MAP
+    try:
+        with open(_CLIENTS_PATH, encoding="utf-8") as f:
+            _CLIENT_MAP = _parse_client_lines(f)
+    except OSError:
+        _CLIENT_MAP = {}
+
+
+_CLIENT_MAP = {}
+reload_clients()
+
+
+def client_from_task(task):
+    """작업내용 토큰이 사전의 의뢰자명과 일치하면 그 이름 반환 (없으면 "").
+    완전일치(2자 이름) 또는 접두일치(3자+ 별칭)만 — 부분문자열 오탐 방지("카푸치노"≠"카푸")."""
+    if not _CLIENT_MAP:
+        return ""
+    t = unicodedata.normalize("NFKC", (task or "")).lower()
+    for tok in _TOKEN_SPLIT_RE.split(t):
+        if not tok:
+            continue
+        if tok in _CLIENT_MAP:
+            return _CLIENT_MAP[tok]
+        for alias, name in _CLIENT_MAP.items():
+            if len(alias) >= 3 and tok.startswith(alias):
+                return name
+    return ""
+
+
 # LLM이 값 대신 틀의 라벨을 그대로 뱉으면 = 추출 실패
 LABELS = {"항목", "금액", "상태", "작업내용", "기한", "담당자", "날짜", "없음", "내용"}
 
@@ -399,31 +461,48 @@ def extract_settle(text):
             "상태": norm_settle_status(str(j.get("상태", "")))}
 
 
-# '[날짜] 대상 작업 | 작업내용' 구조의 전체일정 줄 (사용자 '|' 구분자)
-_SNAP_LINE_RE = re.compile(r"^\s*\[\s*([^\]]+?)\s*\]\s*(.*?)\s*[|｜]\s*(.+?)\s*$")
+# '[날짜] 대상 작업 | 작업내용' 구조의 전체일정 줄 (구분자: | ｜ + 한글모음 ㅣ(U+3163) — 실사용 관측)
+_SNAP_LINE_RE = re.compile(r"^\s*\[\s*([^\]]+?)\s*\]\s*(.*?)\s*[|｜ㅣ]\s*(.+?)\s*$")
+# 구분자 없는 '[날짜] 내용' 줄 ("[7/20 ~ 7/21] - (룩플)솜주먹 세트") — 날짜 검증은 _is_dateish로 별도
+_SNAP_NOPIPE_RE = re.compile(r"^\s*\[\s*([^\]]+?)\s*\]\s*[-–—~:]*\s*(.+?)\s*$")
 _WORK_SUFFIX_RE = re.compile(r"\s*작업\s*$")
+_TRAIL_DONE_RE = re.compile(r"[\s,]*완료\s*$")
 
 
 def parse_structured_snapshot(text):
     """'[7/8 ~ 7/12] 희또 작업 | 의상 삼면도' 같은 구조화 전체일정을 결정적으로 파싱.
     사용자의 '|' 구분자가 DEADLINE_PROMPT의 '|' 출력 포맷과 충돌해 LLM이 오파싱(작업내용을
     껍데기 'OO 작업'으로 만들고 실제 내용을 진행칸에 넣거나 유실)하던 것을 우회한다.
+    구분자 없는 '[날짜] - (태그)내용' 줄도 지원(과다추출 15건짜리 LLM 오파싱 형식) —
+    이 경우 대괄호 안이 날짜꼴일 때만 인정하고, 꼬리 '완료'는 진행칸으로 옮긴다.
     2줄 이상 매치될 때만 rows 반환(그 포맷이 확실). 아니면 None → LLM 폴백."""
     rows, seen = [], set()
     for raw in (text or "").splitlines():
         m = _SNAP_LINE_RE.match(raw)
-        if not m:
-            continue
-        date, prefix, content = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
-        prefix = _WORK_SUFFIX_RE.sub("", prefix).strip()     # "희또 작업" → "희또"
-        task = _clean_task((prefix + " " + content).strip() if prefix else content)
+        if m:
+            date, prefix, content = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
+            prefix = _WORK_SUFFIX_RE.sub("", prefix).strip()     # "희또 작업" → "희또"
+            task_src = (prefix + " " + content).strip() if prefix else content
+            prog = ""
+        else:
+            m = _SNAP_NOPIPE_RE.match(raw)
+            if not m or not _is_dateish(m.group(1).strip()):
+                continue                                     # 대괄호 안이 날짜가 아니면 헤더/메모 줄
+            date = m.group(1).strip()
+            body = _strip_noise_parens(m.group(2)).strip()   # '(룩플)/(개인)' 카테고리 태그 제거
+            prog = ""
+            dm = _TRAIL_DONE_RE.search(body)
+            if dm:
+                prog, body = "완료", body[:dm.start()].strip()
+            task_src = body
+        task = _clean_task(task_src)
         if not task or _canon_task(task) in _GENERIC_ONLY:
             continue
         ck = _canon_task(task)                                # 완전 동일 작업명만 중복 제거
         if ck in seen:
             continue
         seen.add(ck)
-        rows.append({"작업내용": task, "기한": date, "진행": ""})
+        rows.append({"작업내용": task, "기한": date, "진행": prog})
     return rows if len(rows) >= 2 else None
 
 
@@ -461,7 +540,7 @@ def extract_progress(text):
 
 
 # ═══════════ 스냅샷(전체일정) 매칭 엔진 ═══════════
-CANON_VERSION = 2    # canon 규칙 변경 시 +1 → 기동 시 reg_recanon으로 전량 재계산 (v2: 식별 괄호 보존)
+CANON_VERSION = 3    # canon 규칙 변경 시 +1 → 기동 시 reg_recanon으로 전량 재계산 (v3: '(룩플)' 태그 노이즈 추가)
 
 _PAREN_RE = re.compile(r"[(\[{（【〔「『［]\s*(.*?)\s*[)\]}）】〕」』］]")
 _NIM_STRIP_RE = re.compile(r"([가-힣a-z0-9_]{1,12})님")
@@ -469,7 +548,7 @@ _TRAIL = ("까지", "부터", "작업", "예정", "진행", "중")
 # 괄호주석 중 '노이즈'만 제거한다: 날짜/기간 + 아래 카테고리 태그.
 #   ⚠️ "(뮤 헤어 5종)" "(위도 의상)" 같은 식별용 괄호는 반드시 보존 —
 #   이걸 지우면 서로 다른 작업이 전부 canon "개인일정"으로 뭉쳐 중복/오병합이 난다.
-_NOISE_PAREN = {"개인일정", "개인의뢰", "개인작업", "개인", "참고", "비고", "메모", "예시"}
+_NOISE_PAREN = {"개인일정", "개인의뢰", "개인작업", "개인", "참고", "비고", "메모", "예시", "룩플"}
 
 
 def _is_dateish(inner):
@@ -554,12 +633,44 @@ def _bigrams(s):
     return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) >= 2 else ({s} if s else set())
 
 
+def _bigram_ratio(a, b):
+    ba, bb = _bigrams(a), _bigrams(b)
+    return len(ba & bb) / max(1, min(len(ba), len(bb)))
+
+
+_CHOSUNG = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
+_JUNGSUNG = "ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ"
+_JONGSUNG = " ㄱㄲㄳㄴㄵㄶㄷㄹㄺㄻㄼㄽㄾㄿㅀㅁㅂㅄㅅㅆㅇㅈㅊㅋㅌㅍㅎ"
+
+
+def _decompose_jamo(s):
+    """완성형 한글 음절 → 초/중/종성 자모열 (그 외 문자는 그대로 유지).
+    음절 단위 bigram은 짧은 작업명에서 원소 수가 2~3개뿐이라 임계값 근처에서
+    글자 하나 차이로도 판정이 튄다 — 자모로 풀면 원소 수가 늘어 더 촘촘한 신호가 된다."""
+    out = []
+    for ch in s or "":
+        code = ord(ch) - 0xAC00
+        if 0 <= code <= 11171:
+            cho, rem = divmod(code, 21 * 28)
+            jung, jong = divmod(rem, 28)
+            out.append(_CHOSUNG[cho])
+            out.append(_JUNGSUNG[jung])
+            if jong:
+                out.append(_JONGSUNG[jong])
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _core_sim_ok(a, b):
-    """LLM '같다' 판정의 결정적 백스톱 — 핵심 글자 겹침이 전혀 없으면 기각(리깅≠의상)."""
+    """LLM '같다' 판정의 결정적 백스톱 — 핵심 글자 겹침이 전혀 없으면 기각(리깅≠의상).
+    음절 bigram AND 자모 bigram 둘 다 통과해야 병합 허용 — 짧은 작업명('채색1차' vs '채색2차')에서
+    음절 bigram 단독은 임계값 근처 불안정, 자모 단위를 AND로 얹어 백스톱을 보강한다."""
     if not a or not b:
         return True                            # 판단 불가 → LLM 존중
-    ba, bb = _bigrams(a), _bigrams(b)
-    return len(ba & bb) / max(1, min(len(ba), len(bb))) > 0.34
+    if _bigram_ratio(a, b) <= 0.34:
+        return False
+    return _bigram_ratio(_decompose_jamo(a), _decompose_jamo(b)) > 0.34
 
 
 def match_task(candidates, new_task):
@@ -726,7 +837,9 @@ def analyze(content, channel_name, author, mentions, context):
 
     # 일정/작업 (멀티화: 0..N건) — 스냅샷 헤더도 일정 신호로 인정
     if has(text, config.DATE_HINTS) or snap:
-        rows = parse_structured_snapshot(text) if snap else None   # 구조화 전체일정은 결정적 파싱 우선
+        # 구조화 일정줄('[날짜] …' 2줄+)은 결정적 파싱 우선 — '전체일정' 헤더가 없어도.
+        #   (헤더 없는 리스트를 LLM에 넘기면 과다추출(15건)로 확인필요에 회송되던 실사례)
+        rows = parse_structured_snapshot(text)
         if rows is None:
             rows = extract_deadline(text)                  # 0..N건
         if not rows:
@@ -751,7 +864,8 @@ def analyze(content, channel_name, author, mentions, context):
                 "작업내용": r["작업내용"],
                 "진행내용": r["진행"],            # 빈 문자열 가능 (빈값이면 bot이 키 생략/빈칸)
                 "담당자": worker,
-                "의뢰자": nim_in(r["작업내용"]) or client,   # ⑫ 항목별 "@@님" 우선(다중 의뢰자 리스트 대응), 없으면 메시지 의뢰자
+                # ⑫ 항목별 "@@님" 우선(다중 의뢰자 리스트 대응) → 의뢰자 사전(PM 교정 학습) → 메시지 의뢰자
+                "의뢰자": nim_in(r["작업내용"]) or client_from_task(r["작업내용"]) or client,
                 "상태": detect_status(r["진행"]),
             })
         return {"tab": "일정", "is_task": True, "items": items}
