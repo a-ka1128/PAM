@@ -32,5 +32,12 @@ __pycache__/
 .venv/
 venv/
 
+# PyInstaller exe 빌드 산출물 (대용량 바이너리 — 로컬에서 build_exe.bat로 재생성)
+*.exe
+build/
+dist/
+*.spec
+tray_error.log
+
 # 로컬/하네스 상태
 .claude/

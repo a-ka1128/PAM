@@ -6,6 +6,7 @@
 #   워치독: 봇 크래시/종료 시 5초 후 자동 재시작(‘중지’ 상태가 아닐 때만).
 #   단일 인스턴스: 고정 포트 바인딩으로 중복 실행 차단.
 import os
+import sys
 import time
 import socket
 import threading
@@ -17,7 +18,12 @@ from tkinter import scrolledtext, font as tkfont
 import pystray
 from PIL import Image, ImageDraw
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# exe(PyInstaller)로 묶이면 __file__은 임시 추출폴더를 가리키므로 경로가 깨진다.
+#   frozen이면 실제 linkbot 폴더를 고정 사용(어차피 PYW 경로도 이 머신 고정).
+if getattr(sys, "frozen", False):
+    HERE = r"D:\Study\DIscordBot\AutoLinkBot\linkbot"
+else:
+    HERE = os.path.dirname(os.path.abspath(__file__))
 PYW = r"D:\Study\DIscordBot\venv\Scripts\pythonw.exe"
 BOT = os.path.join(HERE, "bot.py")
 LOG = os.path.join(HERE, "linkbot.log")
@@ -284,4 +290,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # --noconsole(exe)에선 stderr가 없으니 파일로 남겨 진단 가능하게
+        import traceback
+        try:
+            with open(os.path.join(HERE, "tray_error.log"), "a", encoding="utf-8") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S\n"))
+                traceback.print_exc(file=f)
+                f.write("\n")
+        except Exception:
+            pass
+        raise
