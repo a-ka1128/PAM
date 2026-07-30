@@ -705,11 +705,20 @@ def match_task(candidates, new_task):
             if not pool:
                 return None
     # 포함 fast-path(결정적): 이름 뗀 핵심이 포함관계(≥4자)로 유일하면 LLM 생략 ("바디수정"⊂"작캠용 바디 수정 도움")
+    #   ⚠️ 길이비 게이트 필수 — 짧은 일반명이 긴 특정 작업에 우연히 포함되는 경우가 많다
+    #   ("오리지널의상" ⊂ "청백가요대전청팀콰르텟팀오리지널의상"). 이때 자동 병합하면
+    #   서로 다른 작업이 조용히 합쳐지므로, 길이 차가 크면 fast-path를 포기하고 LLM에 맡긴다.
     core_new = _core_task(new_task)
     if len(core_new) >= 4:
-        sub = [i for i in pool
-               if (lambda cb: cb and (core_new in cb or cb in core_new)
-                   and min(len(core_new), len(cb)) >= 4)(_core_task(candidates[i].get("task")))]
+        def _contained(cb):
+            if not cb or not (core_new in cb or cb in core_new):
+                return False
+            lo, hi = min(len(core_new), len(cb)), max(len(core_new), len(cb))
+            # 임계 0.4 — 정당한 포함("바디수정"⊂"작캠용바디수정도움" 0.44)은 살리고,
+            #   일반명 우연포함("오리지널의상"⊂"청백가요대전청팀콰르텟팀오리지널의상" 0.33)은 걸러낸다.
+            #   fast-path 포기 = LLM 판정으로 넘김(안전한 방향)이라 임계는 보수적으로 잡는다.
+            return lo >= 4 and lo / hi >= 0.4
+        sub = [i for i in pool if _contained(_core_task(candidates[i].get("task")))]
         if len(sub) == 1:
             return sub[0]
     cand_lines = "\n".join(
