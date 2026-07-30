@@ -104,13 +104,36 @@ def _snap_hw(mid):
     return max([state.get_msg_item_count(mid), 0] + idx)
 
 
+DUP_MATCH_CAND_MAX = 30       # 2단 매칭에 넘길 최대 후보 수 (프롬프트 비대·지연 방지)
+
+
 def _canon_dup_foreign(ch_id, mid, it):
-    """다른 메시지 소유의 동일 canon 활성 행이 이미 있는가 (backfill 재생 이중 생성 방지)."""
-    cn = brain.canon(it.get("작업내용", ""))
+    """다른 메시지 소유의 '같은 작업' 활성 행이 이미 있는가 (중복 등록 방지).
+
+    1단 canon 완전일치 → 2단 스마트 매칭(match_task: 인물 선필터 → 포함관계 →
+    LLM 판정 → 유사도 백스톱). 1단만 있던 시절엔 글자가 조금만 달라도
+    ('요나일님 의상 제작' vs '요나일님 의상 진행 중') 전부 새 행이 되어
+    같은 작업이 2~3중으로 쌓였다. 2단은 스냅샷 경로에서 검증된 같은 엔진이다.
+    """
+    task = it.get("작업내용", "")
+    cn = brain.canon(task)
     if not cn:
         return False
     hits = state.reg_find_by_canon_all(ch_id, cn)
-    return any(not h["row_key"].startswith(f"{mid}#") for h in hits)
+    if any(not h["row_key"].startswith(f"{mid}#") for h in hits):
+        return True                                   # 1단: 완전일치
+    # 2단: 다른 메시지 소유의 활성 후보와 스마트 매칭
+    cands = [c for c in state.reg_channel_items(ch_id, active_only=True)
+             if not c["row_key"].startswith(f"{mid}#")]
+    if not cands:
+        return False
+    cands = cands[-DUP_MATCH_CAND_MAX:]               # 정렬은 불변키 → 재현성 유지
+    try:
+        return brain.match_task(
+            [{"canon": c["canon"], "task": c["task_text"]} for c in cands], task) is not None
+    except Exception:
+        log.exception("중복 2단 매칭 실패 — 새 행으로 처리")
+        return False                                  # LLM 실패 시 보수적으로 등록(유실 방지)
 
 
 async def _drain_outbox():

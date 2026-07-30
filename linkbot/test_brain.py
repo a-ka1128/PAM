@@ -75,6 +75,14 @@ check("parse 머리날짜 제거", len(_bd) == 1 and _bd[0]["작업내용"] == "
 _gp = brain.parse_deadline_json(_dj([{"작업내용": "개인일정", "기한": "", "진행": ""},
                                      {"작업내용": "개인의뢰", "기한": "", "진행": ""}]))
 check("parse 빈껍데기 폐기", _gp == [], _gp)
+# 인물 오병합 방지 — 후보가 전부 '다른 사람 님'이면 LLM 없이 결정적으로 새 행 (실측 표우/카푸 오배정 회귀)
+_pc = lambda ts, q: brain.match_task([{"canon": brain.canon(t), "task": t} for t in ts], q)
+check("match 다른인물 오병합 기각", _pc(["요나일님 의상 제작"], "표우님 의상 제작") is None,
+      _pc(["요나일님 의상 제작"], "표우님 의상 제작"))
+check("match 다른인물 복수후보도 기각", _pc(["요나일님 의상 제작", "카푸님 의상 제작"], "표우님 의상 제작") is None,
+      _pc(["요나일님 의상 제작", "카푸님 의상 제작"], "표우님 의상 제작"))
+check("match 동일인물 완전일치는 병합", _pc(["요나일님 의상 제작"], "요나일님 의상 제작") == 0,
+      _pc(["요나일님 의상 제작"], "요나일님 의상 제작"))
 _gk = brain.parse_deadline_json(_dj([{"작업내용": "개인일정 (뮤 헤어 5종)", "기한": "7/8", "진행": ""}]))
 check("parse 개인일정+내용 유지", len(_gk) == 1, _gk)
 _ss = brain.parse_structured_snapshot(

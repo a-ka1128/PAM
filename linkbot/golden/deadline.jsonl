@@ -10,5 +10,5 @@
 {"name": "상대 내일", "msg": "뿌요님 채색 내일까지 마무리", "channel": "뿌요-일정정리", "author": "뿌요", "mentions": [], "context": [], "expect_tab": "일정", "items": [{"task_has": "채색", "date_ymd": true}]}
 {"name": "애매 중순 유지", "msg": "권민님 바디 수정 7월 중순쯤", "channel": "권민-일정정리", "author": "권민", "mentions": [], "context": [], "expect_tab": "일정", "items": [{"task_has": "바디"}]}
 {"name": "이름유지 b안", "msg": "롤리님 오리지널 헤드 작업 7/30까지", "channel": "마태자-일정정리", "author": "마태자", "mentions": [], "context": [], "expect_tab": "일정", "items": [{"task_has": "헤드", "date": "{Y}-07-30"}]}
-{"name": "작업자불명 회송", "msg": "모델링 7/20까지 부탁해요", "channel": "공지사항", "author": "관리자", "mentions": [], "context": [], "expect_tab": "확인필요", "items": []}
+{"name": "작업자 author 폴백(채널명/멘션 없어도 등록)", "msg": "모델링 7/20까지 부탁해요", "channel": "공지사항", "author": "관리자", "mentions": [], "context": [], "expect_tab": "일정", "items": [{"task_has": "모델링", "date": "{Y}-07-20"}]}
 {"name": "잡담 무시", "msg": "오늘 점심 뭐 먹지 ㅎㅎ", "channel": "잡담", "author": "철수", "mentions": [], "context": [], "expect_tab": null, "items": []}

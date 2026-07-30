@@ -107,9 +107,13 @@ _OLLAMA_LOCK = threading.Lock()
 
 
 def ollama(prompt, schema=None):
+    # num_ctx: Ollama 기본 4096은 위험 — DEADLINE_PROMPT만 1276토큰, 스냅샷 포함 시
+    #   1888토큰이라 출력까지 하면 한계에 근접하고, 초과분은 프롬프트 앞(=규칙·예시)부터
+    #   잘려나가 추출 품질이 조용히 무너진다. 모델 한도는 40960이므로 넉넉히 확보.
     payload = {"model": config.MODEL, "prompt": prompt, "stream": False,
                "keep_alive": "30m",  # 모델을 30분 메모리에 유지 → 재로드 지연 방지
-               "options": {"temperature": 0}}
+               "options": {"temperature": 0,
+                           "num_ctx": getattr(config, "NUM_CTX", 8192)}}
     if schema is not None:
         payload["format"] = schema         # 문법 강제(constrained decoding) → 항상 유효 JSON
     if any(config.MODEL.startswith(p) for p in _THINK_OFF_PREFIXES):
@@ -691,6 +695,15 @@ def match_task(candidates, new_task):
         same = [i for i in pool if nm in (candidates[i].get("task") or "")]
         if same:
             pool = same
+        else:
+            # 그 인물의 기존 작업이 하나도 없는 경우. 예전엔 필터가 통째로 무력화돼
+            #   pool에 남의 작업이 그대로 남았고, 뒤의 포함 판정은 _core_task가 이름을 떼므로
+            #   '표우님 의상 제작'과 '요나일님 의상 제작'이 둘 다 '의상제작'이 되어 오병합됐다.
+            #   → 인물이 명시된 후보는 전부 다른 사람 일이므로 제외한다.
+            #   (인물 표기가 없는 후보는 이름 없이 기록된 같은 작업일 수 있어 남긴다)
+            pool = [i for i in pool if not nim_in(candidates[i].get("task") or "")]
+            if not pool:
+                return None
     # 포함 fast-path(결정적): 이름 뗀 핵심이 포함관계(≥4자)로 유일하면 LLM 생략 ("바디수정"⊂"작캠용 바디 수정 도움")
     core_new = _core_task(new_task)
     if len(core_new) >= 4:
@@ -847,7 +860,12 @@ def analyze(content, channel_name, author, mentions, context):
 
         who = mentions[0] if mentions else author
         client = find_client(content, context)
-        worker = worker_from_channel(channel_name) or (mentions[0] if mentions else None)
+        # 작업자: 채널명 접두어 > 멘션 > 작성자(본인 보고).
+        #   author 폴백이 없던 시절엔 채널명이 '*일정정리*'가 아니고 멘션도 없으면
+        #   완벽히 추출된 일정도 통째로 확인필요로 폐기됐다(실측 회송의 약 30%).
+        #   작업보고는 본인이 쓰는 게 기본이므로 작성자를 담당자로 인정한다.
+        #   (PM이 남의 일정을 대신 적으면 담당자가 PM이 되므로 시트에서 수정)
+        worker = worker_from_channel(channel_name) or (mentions[0] if mentions else None) or author
 
         # 작업자 불명확 = 메시지 단위 → 통째 확인필요 (행 안 쪼갬)
         if not worker:
@@ -857,6 +875,10 @@ def analyze(content, channel_name, author, mentions, context):
         if len(rows) > (25 if snap else 10):
             return review(content, who, client, f"일정 과다추출({len(rows)}건) — 확인 요망")
 
+        # 메시지 단위 의뢰자(client)는 본문의 '첫 OO님'이라, 한 메시지에 여러 사람 작업이
+        #   섞이면 뒷 항목들이 앞사람 이름을 물려받아 '남의 고객'이 붙는다(실측: 표우·카푸 오배정).
+        #   → 항목이 2건 이상이면 메시지 폴백을 쓰지 않는다. 틀린 이름보다 빈칸이 낫다(PM이 채움).
+        allow_msg_client = (len(rows) == 1)
         items = []
         for r in rows:
             items.append({
@@ -864,8 +886,9 @@ def analyze(content, channel_name, author, mentions, context):
                 "작업내용": r["작업내용"],
                 "진행내용": r["진행"],            # 빈 문자열 가능 (빈값이면 bot이 키 생략/빈칸)
                 "담당자": worker,
-                # ⑫ 항목별 "@@님" 우선(다중 의뢰자 리스트 대응) → 의뢰자 사전(PM 교정 학습) → 메시지 의뢰자
-                "의뢰자": nim_in(r["작업내용"]) or client_from_task(r["작업내용"]) or client,
+                # ⑫ 항목별 "@@님" 우선(다중 의뢰자 리스트 대응) → 의뢰자 사전(PM 교정 학습) → 메시지 의뢰자(단건일 때만)
+                "의뢰자": (nim_in(r["작업내용"]) or client_from_task(r["작업내용"])
+                          or (client if allow_msg_client else "")),
                 "상태": detect_status(r["진행"]),
             })
         return {"tab": "일정", "is_task": True, "items": items}
