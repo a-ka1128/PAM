@@ -255,7 +255,12 @@ async def process(msg, live=True, is_edit=False):
         async with _chan_locks[msg.channel.id]:
             fut = items
             if not is_edit:                      # 신규 메시지에만 중복 가드(수정은 자기 행 reconcile 유지)
-                fut = [it for it in items if not _canon_dup_foreign(msg.channel.id, msg.id, it)]
+                # _canon_dup_foreign는 2단 매칭에서 LLM을 부를 수 있다(수 초) →
+                #   반드시 스레드로. 이벤트 루프에서 동기 호출하면 그동안 봇 전체가
+                #   멈춰 게이트웨이 하트비트까지 밀린다.
+                fut = await asyncio.to_thread(
+                    lambda: [it for it in items
+                             if not _canon_dup_foreign(msg.channel.id, msg.id, it)])
                 if len(fut) < len(items):
                     log.info(f"일정 canon중복 {len(items) - len(fut)}건 skip(다른 메시지에 이미 있음)")
             if fut:
@@ -839,7 +844,8 @@ async def backfill_cmd(inter: discord.Interaction, category: str = None, days: i
                     continue
                 fut = [it for it in items if not _is_past(it.get("날짜"), today)]
                 past += len(items) - len(fut)
-                fut = [it for it in fut if not _canon_dup_foreign(ch.id, msg.id, it)]  # 재생 이중 생성 방지
+                fut = await asyncio.to_thread(      # 2단 매칭은 LLM 호출 → 스레드로 (루프 블로킹 방지)
+                    lambda: [it for it in fut if not _canon_dup_foreign(ch.id, msg.id, it)])
                 if not fut:
                     continue
                 async with _chan_locks[ch.id]:
