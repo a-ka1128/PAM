@@ -12,6 +12,9 @@ def fetch(sheet):
     if not config.WEBHOOK_URL:
         return {"err": "no-webhook-url"}
     url = config.WEBHOOK_URL + "?sheet=" + urllib.parse.quote(sheet)
+    tok = getattr(config, "READ_TOKEN", "")       # Apps Script 스크립트 속성 READ_TOKEN과 동일 값
+    if tok:
+        url += "&token=" + urllib.parse.quote(tok)
     try:
         with urllib.request.urlopen(url, timeout=30) as r:
             data = json.loads(r.read().decode("utf-8", "replace"))

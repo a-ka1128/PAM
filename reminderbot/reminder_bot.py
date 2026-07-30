@@ -312,7 +312,60 @@ def build_digest():
         parts.append("\n(임박/연체 일정 없음 — 여유롭네요 👍)")
     parts.append("\n✅ 어제 완료: 집계 시작(내일부터 표시)" if newly_done is None
                  else f"\n✅ 어제 완료 {newly_done}건")
+    parts += _unpaid_section(today)
     return "\n".join(parts), completed_now
+
+
+DISCORD_EPOCH_MS = 1420070400000       # 2015-01-01 UTC — 스노우플레이크 기준시각
+
+
+def _row_age_days(key, today):
+    """행 key('<msg_id>#<n>')의 msg_id에서 작성 시각을 역산해 경과일 반환. 실패 시 None.
+    정산 탭엔 날짜 컬럼이 없어(받는이/항목/금액/상태) 나이를 알 방법이 이것뿐이다."""
+    mid = str(key or "").split("#")[0]
+    if not mid.isdigit():
+        return None
+    try:
+        ms = (int(mid) >> 22) + DISCORD_EPOCH_MS
+        return (today - datetime.fromtimestamp(ms / 1000, KST).date()).days
+    except Exception:
+        return None
+
+
+def _unpaid_section(today):
+    """미수금(정산 미완료) 나이순 — 오래된 것부터. 실패하면 조용히 생략(다이제스트 본체 보호)."""
+    try:
+        rows = sheet.fetch("정산")
+    except Exception:
+        return []
+    if isinstance(rows, dict):
+        log.warning(f"정산 탭 읽기 실패(미수금 섹션 생략): {rows.get('err')}")
+        return []
+    items = []
+    total = 0
+    for r in rows:
+        if (r.get("상태") or "").strip() == "완료":
+            continue
+        amt = (r.get("금액") or "").strip()
+        try:
+            total += int(amt)                       # norm_amount가 정수 문자열로 저장
+        except ValueError:
+            pass
+        items.append((_row_age_days(r.get("key"), today), r))
+    if not items:
+        return []
+    items.sort(key=lambda x: (-(x[0] if x[0] is not None else -1)))   # 오래된 순, 미상은 뒤로
+    out = [f"\n💰 미정산 {len(items)}건" + (f" (합계 {total:,}원)" if total else "")]
+    for age, r in items[:DIGEST_CAP]:
+        who = (r.get("받는이") or "").strip()
+        item = (r.get("항목") or "").strip() or "(항목 없음)"
+        amt = (r.get("금액") or "").strip()
+        amt_s = f"{int(amt):,}원" if amt.isdigit() else (amt or "금액미상")
+        age_s = f"{age}일 경과" if age is not None else "경과일 미상"
+        out.append(f" • {who} {item} — {amt_s}, {age_s}")
+    if len(items) > DIGEST_CAP:
+        out.append(f"   …외 {len(items) - DIGEST_CAP}건")
+    return out
 
 
 async def _dm_long(user, text):

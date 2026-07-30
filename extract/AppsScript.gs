@@ -88,10 +88,23 @@ function doPost(e) {
 
 // 확인필요/일정 탭 → JSON (원본 URL은 HYPERLINK 수식이라 getFormulas로 추출)
 //   확인필요: 봇이 처리(등록/무시) 읽어감.  일정: 리마인더봇 아침 다이제스트용(읽기 전용).
-var READ_ALLOWED = { "확인필요": true, "일정": true };
+var READ_ALLOWED = { "확인필요": true, "일정": true, "정산": true };   // 정산: 미수금 나이 추적(다이제스트)
+
+// 읽기 토큰 — 배포 URL만 알면 일정 탭(의뢰자명·작업내용·원본링크)이 통째로 열람되던 문제 차단.
+//   ⚠️ 토큰은 소스에 넣지 말 것(이 파일은 git 추적됨). 스크립트 속성에 저장한다:
+//      Apps Script 편집기 → 프로젝트 설정 → 스크립트 속성 → READ_TOKEN = <임의 문자열>
+//   속성이 비어 있으면 기존처럼 무인증 동작(점진 배포용) — 설정하는 순간 강제된다.
+function _readTokenOk(e) {
+  var want = PropertiesService.getScriptProperties().getProperty("READ_TOKEN");
+  if (!want) return true;                        // 미설정 = 기존 동작 유지
+  var got = (e && e.parameter && e.parameter.token) || "";
+  return got === want;
+}
+
 function doGet(e) {
   var name = (e && e.parameter && e.parameter.sheet) || "확인필요";
   var out = { ok: true, sheet: name, rows: [] };
+  if (!_readTokenOk(e)) { out.ok = false; out.error = "unauthorized"; return _json(out); }
   if (!READ_ALLOWED[name]) { out.ok = false; out.error = "not allowed"; return _json(out); }
   var head = TABS[name];
   var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);

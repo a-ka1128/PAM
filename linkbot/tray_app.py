@@ -27,11 +27,28 @@ else:
 PYW = r"D:\Study\DIscordBot\venv\Scripts\pythonw.exe"
 BOT = os.path.join(HERE, "bot.py")
 LOG = os.path.join(HERE, "linkbot.log")
-_LOCK_PORT = 58471                              # 단일 인스턴스 가드용 (임의 고정 포트)
+_LOCK_PORT = 58471                              # 이 런처의 단일 인스턴스 가드
+_BOT_LOCK_PORT = 47291                          # bot.py 자신의 단일 인스턴스 가드(bot.py와 동일 값)
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_FAST_EXIT_SEC = 10                             # 이보다 빨리 죽으면 '기동 실패'로 간주
+_BACKOFF = (5, 15, 30, 60, 120)                 # 연속 실패 시 재시도 간격(마지막 값 유지)
 
 RUN_COLOR = "#2ea043"                            # 가동(초록)
 OFF_COLOR = "#8c8c8c"                            # 중지(회색)
+
+
+def _bot_lock_taken():
+    """다른 bot.py가 이미 떠 있는가 (bot.py의 락 포트를 잡아본다).
+    이걸 안 보고 그냥 띄우면, 자식이 즉시 sys.exit(0) → 워치독이 5초마다
+    무한 재시작하는 스핀 루프가 된다(실측 57회)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", _BOT_LOCK_PORT))
+        return False                             # 잡혔다 = 아무도 안 쓰는 중
+    except OSError:
+        return True
+    finally:
+        s.close()
 
 
 class BotManager:
@@ -40,6 +57,7 @@ class BotManager:
 
     def __init__(self):
         self._proc = None
+        self.note = ""                          # 창에 표시할 사유(다른 인스턴스/기동 실패 등)
         self._lock = threading.Lock()
         self._stop = threading.Event()          # 앱 완전 종료
         self._want = threading.Event()          # 원하는 상태: 가동
@@ -51,19 +69,28 @@ class BotManager:
         self._thread.start()
 
     def _run(self):
+        fails = 0                                # 연속 기동 실패 횟수 → 백오프 단계
         while not self._stop.is_set():
             if not self._want.is_set():         # ‘중지’ 상태 → 봇 안 띄우고 대기
                 self._kill()
                 time.sleep(0.5)
+                continue
+            # 다른 인스턴스가 이미 봇 락을 쥐고 있으면 띄우지 않는다(스핀 루프 방지)
+            if _bot_lock_taken():
+                self.note = "다른 인스턴스가 실행 중"
+                self._wait(5)
                 continue
             try:
                 with self._lock:
                     self._proc = subprocess.Popen(
                         [PYW, BOT], cwd=HERE, creationflags=_NO_WINDOW)
             except Exception:
-                time.sleep(5)
+                fails += 1
+                self.note = "실행 실패 — 경로/파이썬 확인"
+                self._wait(_BACKOFF[min(fails, len(_BACKOFF)) - 1])
                 continue
             self._restart.clear()
+            started = time.time()
             while True:                          # 종료/중지/재시작까지 감시
                 if self._proc.poll() is not None:
                     break                        # 스스로 종료/크래시
@@ -75,9 +102,27 @@ class BotManager:
                 break
             if self._restart.is_set():
                 self._restart.clear()
+                fails = 0
                 continue                         # 즉시 재시작
-            if self._want.is_set():
-                time.sleep(5)                    # 크래시 백오프
+            if not self._want.is_set():
+                continue
+            lived = time.time() - started
+            if lived < _FAST_EXIT_SEC:            # 즉사 = 기동 실패 → 점점 길게 쉬며 재시도
+                fails += 1
+                self.note = f"기동 실패 {fails}회 — 재시도 대기"
+                self._wait(_BACKOFF[min(fails, len(_BACKOFF)) - 1])
+            else:
+                fails = 0
+                self.note = ""
+                self._wait(5)                     # 정상 가동 후 크래시 → 짧은 백오프
+
+    def _wait(self, sec):
+        """중지/종료/재시작 요청이 오면 즉시 깨어나는 대기."""
+        end = time.time() + sec
+        while time.time() < end:
+            if self._stop.is_set() or self._restart.is_set() or not self._want.is_set():
+                return
+            time.sleep(0.4)
 
     def _kill(self):
         with self._lock:
@@ -223,7 +268,7 @@ class App:
         if run:
             txt = "가동 중"
         elif want:
-            txt = "재시작 중…"
+            txt = self.mgr.note or "재시작 중…"    # 스핀 대신 사유를 보여준다
         else:
             txt = "중지됨"
         self.status_lbl.config(text=txt)

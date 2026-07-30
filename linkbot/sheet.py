@@ -21,8 +21,13 @@ def push(sheet, items, mode="upsert"):
 
 
 def fetch(sheet):
-    """doGet으로 탭 읽기. 성공: rows 리스트, 실패: {'err':..}"""
+    """doGet으로 탭 읽기. 성공: rows 리스트, 실패: {'err':..}
+    READ_TOKEN: Apps Script 쪽 스크립트 속성과 같은 값을 config에 두면 인증 읽기가 된다
+    (미설정이면 기존처럼 토큰 없이 요청 — 점진 배포)."""
     url = config.WEBHOOK_URL + "?sheet=" + urllib.parse.quote(sheet)
+    tok = getattr(config, "READ_TOKEN", "")
+    if tok:
+        url += "&token=" + urllib.parse.quote(tok)
     try:
         with urllib.request.urlopen(url, timeout=120) as r:     # doGet은 콜드스타트+락으로 최대 ~74s 관측 → 120s
             data = json.loads(r.read().decode("utf-8", "replace"))
