@@ -38,6 +38,9 @@ check("range 끝 일만(일 생략)", brain.norm_date("7/8~10") == "2026-07-08 ~
 check("range 끝 일만+일자 역전: 다음달", brain.norm_date("6월 28일~3일") == "2026-06-28 ~ 2026-07-03", brain.norm_date("6월 28일~3일"))
 check("range 연말 역전: 다음해", brain.norm_date("12월 28일~3일") == "2026-12-28 ~ 2027-01-03", brain.norm_date("12월 28일~3일"))
 check("중순 유지", brain.norm_date("7월 중순") == "7월 중순", brain.norm_date("7월 중순"))
+# 한쪽만 있는 범위는 단일 마감 — "[~ 5/26]"이 " ~ 2026-05-26"(앞 빈칸) 되던 실서버 버그
+check("범위 앞쪽 없음 -> 단일", brain.norm_date("~ 5/26") == "2026-05-26", brain.norm_date("~ 5/26"))
+check("범위 뒤쪽 없음 -> 단일", brain.norm_date("5/26 ~") == "2026-05-26", brain.norm_date("5/26 ~"))
 check("말~초 유지", brain.norm_date("7월말~8월초") == "7월말~8월초", brain.norm_date("7월말~8월초"))
 check("settle 미입금->미정산", brain.norm_settle_status("미입금") == "미정산", brain.norm_settle_status("미입금"))
 check("settle 입금완료->완료", brain.norm_settle_status("입금완료") == "완료", brain.norm_settle_status("입금완료"))
@@ -56,6 +59,11 @@ check("status 마무리후현재정리중->미완료", brain.is_done("마무리 
 check("status 정리중->미완료", brain.is_done("정리 중") is False, brain.is_done("정리 중"))
 check("status 계속작업->미완료", brain.is_done("마무리 후 계속 작업") is False, brain.is_done("마무리 후 계속 작업"))
 check("status 빈값->미완료", brain.is_done("") is False, brain.is_done(""))
+# 미래형('끝내야/끝내려')은 완료 아님 — DONE_HINTS에 '끝내'를 넣었다가 잡힌 회귀
+check("status 끝내야겟->미완료", brain.is_done("오늘 끝내야겟어요") is False, brain.is_done("오늘 끝내야겟어요"))
+check("status 끝내야겠->미완료", brain.is_done("끝내야겠어요") is False, brain.is_done("끝내야겠어요"))
+check("status 끝내려고->미완료", brain.is_done("끝내려고요") is False, brain.is_done("끝내려고요"))
+check("status 끝내고는 완료 유지", brain.is_done("끝내고") is True, brain.is_done("끝내고"))
 import json as _json
 _dj = lambda items: _json.dumps({"items": items}, ensure_ascii=False)
 _pl = brain.parse_deadline_json(_dj([{"작업내용": "모델링", "기한": "7/20", "진행": ""},

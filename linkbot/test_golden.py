@@ -53,7 +53,9 @@ class Tally:
 
 
 def _match_item(exp, items):
-    """기대 item(task_has + date/date_ymd)이 실제 items 중 하나와 맞으면 True."""
+    """기대 item(task_has + date/date_ymd + status/client)이 실제 items 중 하나와 맞으면 True.
+    client: 의뢰자 정확일치("" = 빈칸이어야 함). 다중 항목 메시지에서 앞사람 이름이
+    뒤 항목으로 새던 버그를 골든으로 잡기 위한 필드."""
     for it in items:
         if exp.get("task_has", "") not in it.get("작업내용", ""):
             continue
@@ -64,6 +66,8 @@ def _match_item(exp, items):
             if not _YMD.match(it.get("날짜", "")):
                 continue
         if "status" in exp and it.get("상태", "") != exp["status"]:
+            continue
+        if "client" in exp and (it.get("의뢰자") or "") != exp["client"]:
             continue
         return True
     return False

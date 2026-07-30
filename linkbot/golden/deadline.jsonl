@@ -1,6 +1,7 @@
 # 일정 추출 골든셋 — analyze() 일정 경로. 가상 이름만(실제 시트 데이터 아님).
 # 필드: name, msg, channel, author, mentions[], context[], expect_tab(일정|확인필요|null), items[]
-#   item: {"task_has":부분문자열, "date":정확일치 | "date_ymd":true(형식만) | (생략=날짜 무시)}
+#   item: {"task_has":부분문자열, "date":정확일치 | "date_ymd":true(형식만) | (생략=날짜 무시),
+#          "status":"진행중|완료"(선택), "client":의뢰자 정확일치(선택, ""=빈칸이어야 함)}
 #   date의 "{Y}"는 러너가 실행 연도로 치환(norm_date가 today.year 기준이라 연도부패 방지).
 {"name": "단일 모델링", "msg": "마태자님 캐릭터 모델링 7/15까지", "channel": "마태자-일정정리", "author": "마태자", "mentions": [], "context": [], "expect_tab": "일정", "items": [{"task_has": "모델링", "date": "{Y}-07-15"}]}
 {"name": "다중 2건", "msg": "롤리님 모델링 7/20까지, 의상 7/25까지", "channel": "롤리-일정정리", "author": "롤리", "mentions": [], "context": [], "expect_tab": "일정", "items": [{"task_has": "모델링", "date": "{Y}-07-20"}, {"task_has": "의상", "date": "{Y}-07-25"}]}
