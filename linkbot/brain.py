@@ -106,10 +106,12 @@ _THINK_OFF_PREFIXES = ("qwen3", "deepseek-r1", "magistral")
 _OLLAMA_LOCK = threading.Lock()
 
 
-def ollama(prompt, schema=None):
+def ollama(prompt, schema=None, think=False):
     # num_ctx: Ollama 기본 4096은 위험 — DEADLINE_PROMPT만 1276토큰, 스냅샷 포함 시
     #   1888토큰이라 출력까지 하면 한계에 근접하고, 초과분은 프롬프트 앞(=규칙·예시)부터
     #   잘려나가 추출 품질이 조용히 무너진다. 모델 한도는 40960이므로 넉넉히 확보.
+    # think: 추출은 즉답형이라 항상 끄고, '같은 작업인가' 같은 판단 호출만 켤 수 있게 한다
+    #   (config.THINK_JUDGE). 사고 토큰만큼 느려지므로 이득이 측정될 때만 켠다.
     payload = {"model": config.MODEL, "prompt": prompt, "stream": False,
                "keep_alive": "30m",  # 모델을 30분 메모리에 유지 → 재로드 지연 방지
                "options": {"temperature": 0,
@@ -117,7 +119,7 @@ def ollama(prompt, schema=None):
     if schema is not None:
         payload["format"] = schema         # 문법 강제(constrained decoding) → 항상 유효 JSON
     if any(config.MODEL.startswith(p) for p in _THINK_OFF_PREFIXES):
-        payload["think"] = False
+        payload["think"] = bool(think)
     body = json.dumps(payload).encode("utf-8")
     last = None
     with _OLLAMA_LOCK:
@@ -629,9 +631,36 @@ _PICK_SCHEMA = {"type": "object",
                 "required": ["번호"]}
 
 
+_JSON_OBJ_RE = re.compile(r"\{[^{}]*\}")
+
+
+def _last_json(out):
+    """자유 텍스트 안의 마지막 JSON 객체를 꺼낸다.
+    thinking 모드에선 format(문법 강제)을 못 쓴다 — 스키마를 걸면 모델이 사고 없이
+    곧장 JSON만 뱉어 추론이 사라지기 때문(실측: thinking 길이 0). 그래서 판단 호출을
+    thinking으로 돌릴 때는 스키마 없이 받고 여기서 결과만 회수한다."""
+    if not out:
+        return {}
+    for m in reversed(_JSON_OBJ_RE.findall(out)):
+        try:
+            v = json.loads(m)
+            if isinstance(v, dict):
+                return v
+        except Exception:
+            continue
+    return {}
+
+
+def _judge(prompt):
+    """판단 호출 1건 → dict. config.THINK_JUDGE면 thinking(스키마 없이), 아니면 스키마 강제."""
+    if getattr(config, "THINK_JUDGE", False):
+        return _last_json(ollama(prompt, None, think=True))
+    return _json_or(ollama(prompt, _PICK_SCHEMA), {})
+
+
 def _pick_idx(out, n):
     """{'번호': k} → 1..n | 그 외 None. (0 = 해당없음/새작업)"""
-    k = _json_or(out, {}).get("번호")
+    k = (out if isinstance(out, dict) else _json_or(out, {})).get("번호")
     if isinstance(k, int) and 1 <= k <= n:
         return k
     return None
@@ -700,10 +729,12 @@ def match_task(candidates, new_task):
     # 인물 선필터(결정적): 새 작업에 'OO님'이 있으면 같은 인물 후보만 → 오답 공간 축소
     pool = list(range(len(candidates)))
     nm = nim_in(new_task or "")
+    person_matched = False                     # 같은 인물 후보로 좁혀졌는가 (뒤의 길이비 게이트 면제 조건)
     if nm:
         same = [i for i in pool if nm in (candidates[i].get("task") or "")]
         if same:
             pool = same
+            person_matched = True
         else:
             # 그 인물의 기존 작업이 하나도 없는 경우. 예전엔 필터가 통째로 무력화돼
             #   pool에 남의 작업이 그대로 남았고, 뒤의 포함 판정은 _core_task가 이름을 떼므로
@@ -732,14 +763,22 @@ def match_task(candidates, new_task):
             return sub[0]
     cand_lines = "\n".join(
         f"{k + 1}. {(candidates[i].get('task') or '')[:60]}" for k, i in enumerate(pool))
-    out = ollama(SAME_TASK_PROMPT
-                 + f"기존 작업 목록:\n{cand_lines}\n새로 보고된 작업: {(new_task or '')[:60]}\n->\n",
-                 _PICK_SCHEMA)
+    out = _judge(SAME_TASK_PROMPT
+                 + f"기존 작업 목록:\n{cand_lines}\n새로 보고된 작업: {(new_task or '')[:60]}\n->\n")
     r = _pick_idx(out, len(pool))
     if r is not None:
         pick = pool[r - 1]
-        if not _core_sim_ok(core_new, _core_task(candidates[pick].get("task"))):
+        cb = _core_task(candidates[pick].get("task"))
+        if not _core_sim_ok(core_new, cb):
             return None                        # 글자 겹침 0 = 실체 다름 → 오병합 기각
+        # 길이비 백스톱: 짧은 작업명이 긴 자유문장에 우연히 얽히는 오병합 차단
+        #   ("쉐이프키 만들기" vs "트윈테일 잔머리 없애는 쉐이프키도 한번 만들어 봤습니다").
+        #   ⚠️ 인물이 이미 일치한 경우는 면제 — 이름을 떼면 핵심이 짧아져서
+        #   ("카조에님 의상" → "의상" vs "오리지널의상") 정당한 매칭까지 걸린다.
+        if not person_matched and core_new and cb:
+            lo, hi = min(len(core_new), len(cb)), max(len(core_new), len(cb))
+            if lo / hi < 0.35:
+                return None
         return pick
     return None
 
@@ -832,10 +871,9 @@ def route_reply(candidates, text):
         return ("one", 0)                      # 후보 1개면 LLM 생략
     cand_lines = "\n".join(
         f"{i + 1}. {(c.get('task') or '')[:60]}" for i, c in enumerate(candidates))
-    out = ollama(REPLY_ROUTE_PROMPT
-                 + f"작업 목록:\n{cand_lines}\n답장: {(text or '')[:200]}\n->\n",
-                 _PICK_SCHEMA)
-    k = _json_or(out, {}).get("번호")
+    out = _judge(REPLY_ROUTE_PROMPT
+                 + f"작업 목록:\n{cand_lines}\n답장: {(text or '')[:200]}\n->\n")
+    k = out.get("번호")
     if isinstance(k, int) and 1 <= k <= len(candidates):
         return ("one", k - 1)
     if k == 0:
