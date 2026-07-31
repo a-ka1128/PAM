@@ -332,6 +332,26 @@ def _row_age_days(key, today):
         return None
 
 
+_AMT_RE = re.compile(r"(\d[\d,]*)(?:\.\d+)?\s*(억|만|천)?")
+_AMT_UNIT = {"억": 100000000, "만": 10000, "천": 1000}
+
+
+def _parse_amount(s):
+    """시트 금액 → 정수(원) | None.
+    ① doGet이 getDisplayValues()로 읽어 셀 표시형식이 그대로 온다("500,000") — 쉼표·통화기호를
+       떼지 않으면 int()가 전부 실패해 합계가 엉뚱해진다(실측: 합계가 140원으로 나왔다).
+    ② 봇이 넣는 값은 norm_amount로 정규화된 정수지만, 사람이 손으로 "20만원"처럼 적을 수 있어
+       만/억/천 단위도 곱해준다(안 하면 200000이 20으로 읽혀 1만배 어긋난다)."""
+    m = _AMT_RE.search((s or "").replace(" ", ""))
+    if not m:
+        return None
+    try:
+        n = int(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    return n * _AMT_UNIT.get(m.group(2), 1)
+
+
 def _unpaid_section(today):
     """미수금(정산 미완료) 나이순 — 오래된 것부터. 실패하면 조용히 생략(다이제스트 본체 보호)."""
     try:
@@ -346,11 +366,12 @@ def _unpaid_section(today):
     for r in rows:
         if (r.get("상태") or "").strip() == "완료":
             continue
-        amt = (r.get("금액") or "").strip()
-        try:
-            total += int(amt)                       # norm_amount가 정수 문자열로 저장
-        except ValueError:
-            pass
+        # 받는이·항목·금액이 전부 빈 껍데기 행은 미정산이 아니다(시트에 잔재가 쌓인다)
+        if not any((r.get(k) or "").strip() for k in ("받는이", "항목", "금액")):
+            continue
+        amt = _parse_amount(r.get("금액"))
+        if amt:
+            total += amt
         items.append((_row_age_days(r.get("key"), today), r))
     if not items:
         return []
@@ -359,8 +380,8 @@ def _unpaid_section(today):
     for age, r in items[:DIGEST_CAP]:
         who = (r.get("받는이") or "").strip()
         item = (r.get("항목") or "").strip() or "(항목 없음)"
-        amt = (r.get("금액") or "").strip()
-        amt_s = f"{int(amt):,}원" if amt.isdigit() else (amt or "금액미상")
+        amt_n = _parse_amount(r.get("금액"))
+        amt_s = f"{amt_n:,}원" if amt_n else "금액미상"
         age_s = f"{age}일 경과" if age is not None else "경과일 미상"
         out.append(f" • {who} {item} — {amt_s}, {age_s}")
     if len(items) > DIGEST_CAP:
