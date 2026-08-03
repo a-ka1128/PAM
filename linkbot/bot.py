@@ -304,7 +304,10 @@ async def process(msg, live=True, is_edit=False):
         if not items:
             return True                          # 전건 중복 → 시트 무변경(정상 종료)
         # 이모지: live + is_task + 미추적/미플래그일 때만 1세트
-        if live and res.get("is_task") and msg.id not in flagged:
+        #   config.PRIORITY가 비면 아예 건너뛴다 — 이모지를 소비하는 건 리마인더봇인데
+        #   2026-07-31에 그 봇을 중단했다. 빈 dict로 두면 for문만 비는 게 아니라
+        #   flagged 기록까지 막아야 쓸모없는 상태가 안 쌓인다.
+        if live and config.PRIORITY and res.get("is_task") and msg.id not in flagged:
             try:
                 for e in config.PRIORITY:
                     await msg.add_reaction(e)
