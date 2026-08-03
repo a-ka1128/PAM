@@ -24,7 +24,13 @@ if getattr(sys, "frozen", False):
     HERE = r"D:\Study\DIscordBot\AutoLinkBot\linkbot"
 else:
     HERE = os.path.dirname(os.path.abspath(__file__))
-PYW = r"D:\Study\DIscordBot\venv\Scripts\pythonw.exe"
+# 봇을 띄울 인터프리터 — venv pythonw.exe를 'LooKP Bot.exe'로 복사해둔 것.
+#   이름을 주는 이유: 작업관리자에서 'pythonw.exe'로만 보이면 봇이 켜져 있는지 알 수 없다.
+#   서명은 파일 내용에 붙으므로 이름을 바꿔도 유효하고 Smart App Control을 통과한다.
+#   (없으면 원본 pythonw.exe로 자동 폴백 — venv 재생성 시에도 죽지 않게)
+_NAMED_PYW = r"D:\Study\DIscordBot\venv\Scripts\LooKP Bot.exe"
+_PLAIN_PYW = r"D:\Study\DIscordBot\venv\Scripts\pythonw.exe"
+PYW = _NAMED_PYW if os.path.exists(_NAMED_PYW) else _PLAIN_PYW
 BOT = os.path.join(HERE, "bot.py")
 LOG = os.path.join(HERE, "linkbot.log")
 _LOCK_PORT = 58471                              # 이 런처의 단일 인스턴스 가드
