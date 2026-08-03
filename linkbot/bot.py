@@ -83,6 +83,36 @@ _chan_locks = defaultdict(asyncio.Lock)     # 채널별 직렬화: diff·답장 
 _LINK_RE = re.compile(r"discord\.com/channels/(\d+)/(\d+)/(\d+)")
 
 
+def _cat_name(ch):
+    """채널이 속한 카테고리 이름. 스레드면 부모 채널 기준. 없으면 ''.
+    음성채널의 텍스트챗(VoiceChannel)도 category를 가지므로 동일하게 처리된다."""
+    cat = getattr(ch, "category", None)
+    if cat is None:
+        parent = getattr(ch, "parent", None)          # 스레드 → 부모 텍스트채널
+        cat = getattr(parent, "category", None) if parent is not None else None
+    return getattr(cat, "name", "") or ""
+
+
+def _norm_cat(s):
+    """카테고리 이름 비교용 정규화 — 이모지·구분자(ㅣ)·공백을 떼고 비교.
+    실제 이름이 '🗓️ㅣ일정 관리'처럼 장식이 붙어 있어 정확일치로는 못 맞춘다."""
+    t = re.sub(r"[\s|ㅣ｜/·・\-_]", "", (s or "").lower())
+    return re.sub(r"[^0-9a-z가-힣]", "", t)
+
+
+def _channel_allowed(ch):
+    """이 채널을 추출 대상으로 볼 것인가.
+    config.ALLOWED_CATEGORIES가 비어 있으면 전체 허용(기존 동작), 채워져 있으면
+    그 카테고리 하위만 처리한다 — 잡담·음성채널 채팅에까지 이모지가 붙던 문제 차단."""
+    allow = getattr(config, "ALLOWED_CATEGORIES", None) or []
+    if not allow:
+        return True
+    cat = _norm_cat(_cat_name(ch))
+    if not cat:
+        return False                                   # 카테고리 없는 채널 = 대상 아님
+    return any(_norm_cat(a) in cat for a in allow)
+
+
 def _channel_from_link(link):
     m = _LINK_RE.search(link or "")
     return int(m.group(2)) if m else None
@@ -190,6 +220,8 @@ async def catchup():
     count = 0
     for guild in client.guilds:
         for ch in getattr(guild, "text_channels", []):
+            if not _channel_allowed(ch):        # 대상 밖 채널은 히스토리도 읽지 않는다(불필요한 API/LLM 비용)
+                continue
             try:
                 async for msg in ch.history(after=after, limit=200, oldest_first=True):
                     if msg.author.bot:
@@ -212,6 +244,8 @@ async def process(msg, live=True, is_edit=False):
     if msg.guild is None or msg.author.bot:
         return False
     if msg.channel.id in getattr(config, "EXCLUDED_CHANNEL_IDS", []):
+        return False
+    if not _channel_allowed(msg.channel):          # 카테고리 화이트리스트 (catchup/backfill/edit 공통 관문)
         return False
 
     ctx = list(ctx_buf[msg.channel.id])
@@ -445,6 +479,8 @@ async def _apply_snapshot(msg, items, link):
 @client.event
 async def on_message(msg):
     if msg.author.bot or msg.guild is None:
+        return
+    if not _channel_allowed(msg.channel):     # 답장 갱신 경로까지 함께 차단 (process 진입 전)
         return
 
     ref = msg.reference.message_id if msg.reference else None
