@@ -142,6 +142,15 @@ class BotManager:
             p = self._proc
         return bool(p and p.poll() is None)
 
+    def pid(self):
+        """실행 중인 봇 PID(없으면 None).
+        venv의 pythonw.exe는 '런처 껍데기 + 실제 인터프리터' 2단으로 떠서 작업관리자에는
+        프로세스가 2개로 보인다 — 인스턴스가 2개인 게 아니다. 창에 PID를 띄워
+        '하나만 돌고 있다'를 눈으로 확인할 수 있게 한다."""
+        with self._lock:
+            p = self._proc
+        return p.pid if (p and p.poll() is None) else None
+
     def wants_running(self):
         return self._want.is_set()
 
@@ -266,7 +275,7 @@ class App:
         want = self.mgr.wants_running()
         self.dot.itemconfig(self.dot_id, fill=RUN_COLOR if run else OFF_COLOR)
         if run:
-            txt = "가동 중"
+            txt = f"가동 중 · 봇 1개 (PID {self.mgr.pid()})"
         elif want:
             txt = self.mgr.note or "재시작 중…"    # 스핀 대신 사유를 보여준다
         else:
