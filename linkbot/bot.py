@@ -64,6 +64,9 @@ async def alert(text):
 
 async def alert_err(key, text, threshold=1):
     _fail_count[key] = _fail_count.get(key, 0) + 1
+    # DM만 보내면 나중에 원인 추적이 불가능하다(실측: 시트 404 DM이 왔는데 로그에 흔적 0).
+    #   레이트리밋에 걸려 DM을 안 보내는 경우에도 로그에는 반드시 남긴다.
+    log.warning(f"[{key}] {text} (연속 {_fail_count[key]}회)")
     if _fail_count[key] < threshold:          # 연속 threshold회 미만 = 일시 블립 → 조용히 넘김
         return
     now = time.time()
