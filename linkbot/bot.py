@@ -47,6 +47,11 @@ ctx_buf = defaultdict(lambda: deque(maxlen=8))
 flagged = set()
 _last_alert = {}
 _fail_count = {}    # 키별 연속 실패 횟수 (성공 시 clear_err로 리셋)
+# analyze()가 LLM 문제로 실패한 메시지 중 가장 이른 것의 시각(epoch). 예전엔 실패해도 last_seen을
+#   현재 시각으로 밀어버려 Ollama가 꺼져 있던 동안의 메시지가 영영 유실됐다(실측: 봇이 Ollama보다
+#   먼저 떠서 catchup이 통째로 실패 → 시트에 안 올라감). 이 시각 이전으로는 last_seen을 못 넘긴다.
+_llm_fail_since = None
+_catchup_busy = False       # catchup 동시 실행 방지 (초기 catchup 중 LLM이 살아나 재-catchup이 겹치면 이중 추출)
 
 
 def jump(g, c, m):
@@ -78,6 +83,52 @@ async def alert_err(key, text, threshold=1):
 
 def clear_err(key):
     _fail_count[key] = 0
+
+
+def _mark_seen(ts=None):
+    """last_seen 갱신 — 단 LLM 실패로 못 읽은 메시지가 있으면 그 직전까지만(다음 catchup이 다시 읽도록)."""
+    ts = time.time() if ts is None else ts
+    if _llm_fail_since is not None:
+        ts = min(ts, _llm_fail_since - 1)
+    state.set_kv("last_seen", ts)
+
+
+def _note_llm_fail(msg):
+    global _llm_fail_since
+    ts = msg.created_at.timestamp()
+    if _llm_fail_since is None or ts < _llm_fail_since:
+        _llm_fail_since = ts
+
+
+async def _recover_catchup(wait_ollama=False):
+    """LLM이 살아난 뒤 한 번: 실패 구간(last_seen 이후)을 다시 따라잡는다. 이미 등록된 메시지는 catchup이 건너뛴다.
+    wait_ollama=True면 먼저 Ollama가 뜰 때까지(최대 10분) 기다린다 — 시작 catchup이 실패로 끝났을 때 쓴다."""
+    global _llm_fail_since
+    if _catchup_busy:
+        return                            # 진행 중인 catchup이 끝나면 다음 성공 시점에 다시 시도된다
+    if wait_ollama and await asyncio.to_thread(_wait_ollama, 600) is None:
+        log.warning("Ollama 10분 대기 초과 — 실패 구간은 다음 성공/재시작 때 재처리")
+        return
+    if _catchup_busy or _llm_fail_since is None:
+        return
+    _llm_fail_since = None                # 다시 실패하면 catchup 안에서 새로 기록된다
+    n = await catchup()
+    log.info(f"LLM 복구 → 실패 구간 재처리 {n}건")
+
+
+def _wait_ollama(max_wait=60):
+    """Ollama 포트가 열릴 때까지 대기(초). 시작프로그램에서 봇과 Ollama가 동시에 뜨면 봇이 먼저 살아나
+    catchup이 ConnectionRefused로 전부 실패했다(실측 09-13: 봇 11:37:29, Ollama 11:37:38)."""
+    import urllib.request, urllib.parse
+    base = "{0.scheme}://{0.netloc}".format(urllib.parse.urlsplit(config.OLLAMA))
+    t0 = time.time()
+    while time.time() - t0 < max_wait:
+        try:
+            with urllib.request.urlopen(base + "/api/tags", timeout=3):
+                return time.time() - t0
+        except Exception:
+            time.sleep(2)
+    return None
 
 
 # ── 스냅샷(전체일정) 공용 헬퍼 ──
@@ -198,7 +249,14 @@ async def on_ready():
         log.info(f"canon 재계산 완료 (v{brain.CANON_VERSION})")
     if not resolve_loop.is_running():
         resolve_loop.start()
+    waited = await asyncio.to_thread(_wait_ollama, 60)
+    if waited is None:
+        log.warning("Ollama가 60초 안에 안 떴음 — catchup은 진행하되 실패분은 last_seen을 안 밀어 다음에 다시 읽는다")
+    elif waited >= 2:
+        log.info(f"Ollama 준비 대기 {waited:.0f}s")
     n = await catchup()
+    if _llm_fail_since is not None:
+        asyncio.create_task(_recover_catchup(wait_ollama=True))   # 시작 catchup이 LLM 문제로 샌 경우 → 뜨면 재처리
     # 시작 알림 (크래시 루프 스팸 방지: 영속 레이트리밋 5분)
     last_a = float(state.get_kv("last_startup_alert", 0) or 0)
     if time.time() - last_a > 300:
@@ -208,6 +266,17 @@ async def on_ready():
 
 async def catchup():
     """봇이 꺼진 동안 올라온 메시지를 따라잡아 추출(이모지는 안 붙임)."""
+    global _catchup_busy
+    if _catchup_busy:
+        return 0
+    _catchup_busy = True
+    try:
+        return await _catchup()
+    finally:
+        _catchup_busy = False
+
+
+async def _catchup():
     last = state.get_kv("last_seen")
     if not last:
         # 최초 실행(새 PC/DB): 그냥 스킵하면 이사 동안 쌓인 backlog가 통째로 유실됨.
@@ -229,6 +298,8 @@ async def catchup():
                 async for msg in ch.history(after=after, limit=200, oldest_first=True):
                     if msg.author.bot:
                         continue
+                    if state.get_msg_item_count(msg.id) > 0 or state.is_snap_msg(msg.id):
+                        continue                    # 이미 등록됨(LLM 복구 후 재-catchup 시 성공분 재추출 방지)
                     ref = msg.reference.message_id if msg.reference else None
                     consumed = False
                     if ref:
@@ -237,7 +308,7 @@ async def catchup():
                         count += 1
             except Exception:
                 pass
-    state.set_kv("last_seen", time.time())
+    _mark_seen()
     if count:
         log.info(f"catchup: {count}건 따라잡음")
     return count
@@ -259,11 +330,17 @@ async def process(msg, live=True, is_edit=False):
     try:
         res = await asyncio.to_thread(
             brain.analyze, msg.content, msg.channel.name, msg.author.display_name, mentions, ctx)
-    except Exception:
-        log.exception("analyze 실패")
+    except Exception as e:
+        _note_llm_fail(msg)                # last_seen을 이 메시지 앞에 묶어둔다 → 나중에 다시 읽힘
+        if isinstance(e, (ConnectionError, OSError)) or "10061" in str(e) or "Connection refused" in str(e):
+            log.error(f"analyze 실패: Ollama 연결 거부 ({config.OLLAMA})")   # 뻔한 원인은 트레이스백 없이 한 줄
+        else:
+            log.exception("analyze 실패")
         await alert_err("ollama", "⚠️ 추출 실패 — Ollama(로컬 AI)가 응답하지 않는 것 같아요. 켜져 있는지 확인해 주세요.", threshold=2)
         return False
     clear_err("ollama")    # 추출 성공 → 연속실패 카운터 리셋
+    if _llm_fail_since is not None and not _catchup_busy:
+        asyncio.create_task(_recover_catchup())   # LLM 살아남 → 실패 구간을 백그라운드로 다시 읽는다
 
     link = jump(msg.guild.id, msg.channel.id, msg.id)
 
@@ -499,7 +576,7 @@ async def on_message(msg):
     if not consumed:
         await process(msg, live=True)
 
-    state.set_kv("last_seen", time.time())
+    _mark_seen()
 
 
 async def _apply_reply_update(reply_msg, ref_id):
@@ -647,7 +724,7 @@ async def on_raw_message_edit(payload):
         consumed, _ = await _apply_reply_update(msg, ref)
     if not consumed:
         await process(msg, live=False, is_edit=True)    # 이모지 재부착 안 함·컨텍스트 오염 없음
-    state.set_kv("last_seen", time.time())
+    _mark_seen()
 
 
 # ── 확인필요 처리 (시트 read-back): PM이 처리=등록/무시 → 봇이 반영 ──
@@ -673,7 +750,9 @@ def _reextract_settle(content):
     return ("정산", st)
 
 
-@tasks.loop(seconds=180)
+# 확인필요 폴링 주기. 3분→5분: 폴링 1회가 GAS 락을 잡는 구간이라 쓰기와 겹칠 확률을 줄인다
+#   (사람이 시트에서 '등록/무시'를 찍고 5분 안에 반영되면 충분).
+@tasks.loop(seconds=300)
 async def resolve_loop():
     global _resolve_busy
     if _resolve_busy:
