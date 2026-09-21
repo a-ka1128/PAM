@@ -6,19 +6,25 @@ import urllib.request
 import urllib.parse
 import config
 
-# Apps Script는 LockService로 모든 요청을 직렬화한다. 봇이 3분마다 확인필요를 폴링하고
+# Apps Script는 LockService로 모든 요청을 직렬화한다. 봇이 몇 분마다 확인필요를 폴링하고
 #   쓰기까지 겹치면 대기가 길어지다 GAS가 404/5xx를 뱉는다(실측: 8회 중 1회 실패,
-#   실패 직전 응답이 14~32초로 늘어짐). 일시적이라 한 번만 다시 쳐도 대부분 통과한다.
-_RETRY = 2              # 총 시도 횟수
-_RETRY_WAIT = 3.0       # 재시도 전 대기(초) — 락이 풀릴 시간을 준다
+#   실패 직전 응답이 14~32초로 늘어짐). GAS 쪽 배치 쓰기로 락 점유는 짧아졌지만
+#   구글 프런트의 무작위 404는 여전히 있어(2026-09-13: 쓰기 없는 시간대에도 발생),
+#   2회 시도·3초 대기로는 30초짜리 혼잡을 못 넘긴다 → 3회, 대기는 3초 → 10초로 늘려 잡는다.
+_RETRY = 3                      # 총 시도 횟수
+_RETRY_WAITS = (3.0, 10.0)      # n번째 실패 후 대기(초) — 뒤로 갈수록 길게(락이 풀릴 시간)
 _TRANSIENT = (404, 429, 500, 502, 503, 504)
+
+
+class _Locked(Exception):
+    """doGet이 락 대기(20s)를 못 이기고 {"ok":false,"error":"locked"}를 돌려준 경우 — 일시적이라 재시도 대상."""
 
 
 def _transient(e):
     """다시 시도할 가치가 있는 오류인가 (일시적 혼잡/타임아웃)."""
     if isinstance(e, urllib.error.HTTPError):
         return e.code in _TRANSIENT
-    return isinstance(e, (urllib.error.URLError, TimeoutError, OSError))
+    return isinstance(e, (urllib.error.URLError, TimeoutError, OSError, _Locked))
 
 
 def _request(make_call):
@@ -31,7 +37,7 @@ def _request(make_call):
             last = e
             if attempt + 1 >= _RETRY or not _transient(e):
                 break
-            time.sleep(_RETRY_WAIT)
+            time.sleep(_RETRY_WAITS[min(attempt, len(_RETRY_WAITS) - 1)])
     raise last
 
 
@@ -62,12 +68,17 @@ def fetch(sheet):
         url += "&token=" + urllib.parse.quote(tok)
     def call():
         with urllib.request.urlopen(url, timeout=120) as r:     # doGet은 콜드스타트+락으로 최대 ~74s 관측 → 120s
-            return json.loads(r.read().decode("utf-8", "replace"))
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        if isinstance(data, dict) and data.get("error") == "locked":
+            raise _Locked("locked")                             # 락 경합 → _request가 다시 시도
+        return data
     try:
         data = _request(call)
         if not isinstance(data, dict) or not data.get("ok"):
             return {"err": (data.get("error") if isinstance(data, dict) else "bad-json")}
         return data.get("rows", [])
+    except _Locked:
+        return {"err": "locked"}
     except Exception as e:
         return {"err": str(e)}
 

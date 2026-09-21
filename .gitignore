@@ -41,3 +41,6 @@ tray_error.log
 
 # 로컬/하네스 상태
 .claude/
+
+# state.db 백업 사본 (state.db.bak_YYYYMMDD_...)
+*.db.bak*

@@ -39,6 +39,11 @@ function doPost(e) {
     var mode = d.mode || "upsert";       // "upsert"(신규/수정) | "merge"(답장 부분병합)
     var items = d.items || [], n = 0;
     var nextRow = sh.getLastRow() + 1;
+    // 행 단위 배치 쓰기 — 예전엔 셀마다 setValue(항목당 8~10회 왕복)라 10건이면 100회를 넘겼고,
+    //   그동안 락을 쥔 채 20~40초를 끌어 봇의 3분 폴링(doGet)과 겹치면 GAS가 404/500을 뱉었다.
+    //   지금은 항목당 읽기 2회 + 쓰기 1회. 기존행은 값·수식을 먼저 읽어 비공백만 덮고 나머지는 그대로 돌려쓴다.
+    var dt = head.indexOf("날짜");
+    var dateCol = (dt >= 0) ? _colA1(dt + 1) : null;
     items.forEach(function (it) {
       var f = it.fields || {};
       var exists = map[it.key] !== undefined;
@@ -47,38 +52,35 @@ function doPost(e) {
       var row = exists ? map[it.key] : nextRow;
       if (!exists) nextRow++;
 
+      var cur = [], curF = [];
+      if (exists) {
+        var rg = sh.getRange(row, 1, 1, keyCol);
+        cur = rg.getValues()[0]; curF = rg.getFormulas()[0];
+      }
+      var keep = function (ci) { return exists ? (curF[ci] ? curF[ci] : cur[ci]) : ""; };   // 사용자가 넣은 수식도 보존
+      var out = [], fmt = {};                                                              // fmt: 열index → 숫자서식
       head.forEach(function (h, ci) {
-        if (h === "D-day" || h === "원본" || h === "날짜" || h === "금액") return;   // 특수 처리 별도
         var provided = (f[h] !== undefined && f[h] !== null && String(f[h]).trim() !== "");
-        if (exists) {
-          if (provided) sh.getRange(row, ci + 1).setValue(f[h]);     // 기존행: 비공백만 덮기(나머지 보존)
+        if (h === "원본") {
+          out[ci] = f["링크"] ? '=HYPERLINK("' + String(f["링크"]).replace(/"/g, "") + '","원본")' : keep(ci);
+        } else if (h === "D-day") {
+          out[ci] = (dt >= 0) ? _ddayFormula(dateCol + row) : keep(ci);
+        } else if (h === "날짜") {
+          if (provided) {
+            var dv = String(f[h]);
+            if (dv.indexOf("~") >= 0) { out[ci] = dv; fmt[ci] = "@"; }                    // 범위 → 텍스트 유지(정렬은 앞날짜 기준)
+            else { var pd = parseYmd(dv); if (pd) { out[ci] = pd; fmt[ci] = "yyyy-mm-dd"; } else out[ci] = dv; }   // 비표준 날짜 원문
+          } else out[ci] = keep(ci);                                                        // 신규+날짜없음=빈칸
+        } else if (h === "금액") {
+          var num = provided ? parseInt(String(f[h]).replace(/[^0-9]/g, "")) : NaN;
+          if (!isNaN(num)) { out[ci] = num; fmt[ci] = "#,##0"; } else out[ci] = keep(ci);
         } else {
-          sh.getRange(row, ci + 1).setValue(provided ? f[h] : "");   // 신규행: 빈칸 초기화
+          out[ci] = provided ? f[h] : keep(ci);                                            // 기존행: 비공백만 덮기 / 신규행: 빈칸 초기화
         }
       });
-
-      var li = head.indexOf("원본");
-      if (li >= 0 && f["링크"]) sh.getRange(row, li + 1).setFormula('=HYPERLINK("' + String(f["링크"]).replace(/"/g, "") + '","원본")');
-
-      var dt = head.indexOf("날짜"), dd = head.indexOf("D-day");
-      if (dt >= 0 && f["날짜"] !== undefined && String(f["날짜"]).trim() !== "") {
-        var dv = String(f["날짜"]);
-        if (dv.indexOf("~") >= 0) {                                   // 범위 → 텍스트 유지(정렬은 앞날짜 기준)
-          sh.getRange(row, dt + 1).setNumberFormat("@").setValue(dv);
-        } else {
-          var pd = parseYmd(dv);
-          if (pd) sh.getRange(row, dt + 1).setValue(pd).setNumberFormat("yyyy-mm-dd");
-          else sh.getRange(row, dt + 1).setValue(dv);                 // 비표준 날짜 원문
-        }
-      } else if (!exists && dt >= 0) {
-        sh.getRange(row, dt + 1).setValue("");                        // 신규+날짜없음=빈칸
-      }
-      if (dd >= 0 && dt >= 0) { var a1 = sh.getRange(row, dt + 1).getA1Notation(); sh.getRange(row, dd + 1).setFormula('=IF(ISNUMBER(' + a1 + '),' + a1 + '-TODAY(),IFERROR(DATEVALUE(TRIM(MID(' + a1 + ',FIND("~",' + a1 + ')+1,50)))-TODAY(),""))'); }
-
-      var am = head.indexOf("금액");
-      if (am >= 0 && f["금액"] !== undefined && String(f["금액"]).trim() !== "") { var num = parseInt(String(f["금액"]).replace(/[^0-9]/g, "")); if (!isNaN(num)) sh.getRange(row, am + 1).setValue(num).setNumberFormat("#,##0"); }
-
-      sh.getRange(row, keyCol).setValue(it.key);
+      out[keyCol - 1] = it.key;
+      sh.getRange(row, 1, 1, keyCol).setValues([out]);                                     // "=..." 문자열은 수식으로 들어간다
+      Object.keys(fmt).forEach(function (ci) { sh.getRange(row, +ci + 1).setNumberFormat(fmt[ci]); });
       map[it.key] = row; n++;
     });
     if (head.indexOf("날짜") >= 0) resortSchedule();   // 일정 = 날짜순 자동 정렬
@@ -340,12 +342,18 @@ function resortSchedule() {
   sh.hideColumns(sortCol);
   var ddi = head.indexOf("D-day");
   if (ddi >= 0) {
-    for (var i = 2; i <= last; i++) {
-      var a1 = sh.getRange(i, dCol).getA1Notation();
-      sh.getRange(i, ddi + 1).setFormula('=IF(ISNUMBER(' + a1 + '),' + a1 + '-TODAY(),IFERROR(DATEVALUE(TRIM(MID(' + a1 + ',FIND("~",' + a1 + ')+1,50)))-TODAY(),""))');
-    }
+    // D-day 수식 재부착을 열 전체 setFormulas 1회로. 예전엔 행마다 setFormula를 불러 340행이면 340회 왕복
+    //   (=푸시 1번에 20~30초, 그동안 락 점유) — 404 폭주의 주범이었다.
+    var dl = _colA1(dCol), fs = [];
+    for (var i = 2; i <= last; i++) fs.push([_ddayFormula(dl + i)]);
+    sh.getRange(2, ddi + 1, last - 1, 1).setFormulas(fs);
   }
 }
+
+// 열 번호 → A1 열 문자 (1→A, 27→AA)
+function _colA1(c) { var s = ""; while (c > 0) { var m = (c - 1) % 26; s = String.fromCharCode(65 + m) + s; c = (c - m - 1) / 26; } return s; }
+// D-day 수식 — 날짜셀이 숫자(날짜)면 그대로, "A ~ B" 범위 텍스트면 뒤 날짜 기준
+function _ddayFormula(a1) { return '=IF(ISNUMBER(' + a1 + '),' + a1 + '-TODAY(),IFERROR(DATEVALUE(TRIM(MID(' + a1 + ',FIND("~",' + a1 + ')+1,50)))-TODAY(),""))'; }
 
 function parseYmd(s) { var m = String(s || "").match(/(20\d{2})-(\d{1,2})-(\d{1,2})/); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; }
 
