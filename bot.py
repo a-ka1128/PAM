@@ -6,10 +6,13 @@
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+import os
 import re
 import sys
 import logging
 import hashlib
+import hmac
+import secrets
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -71,10 +74,37 @@ def parse_kst(s):
     return None
 
 
+_HASH_KEY = None
+
+
+def _hash_key():
+    """익명화용 비밀 키. 솔트 없는 SHA-256은 디스코드 ID(공개값)를 넣어 보면 바로 역추적되므로
+    HMAC 키를 쓴다. config.HASH_SALT가 있으면 그것, 없으면 data/hash_key 를 1회 생성해 재사용."""
+    global _HASH_KEY
+    if _HASH_KEY is None:
+        salt = getattr(config, "HASH_SALT", "")
+        if salt:
+            _HASH_KEY = salt.encode()
+        else:
+            path = os.path.join(db.DATA_DIR, "hash_key")
+            if not os.path.exists(path):
+                os.makedirs(db.DATA_DIR, exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(secrets.token_hex(32))
+            with open(path, encoding="utf-8") as f:
+                _HASH_KEY = f.read().strip().encode()
+    return _HASH_KEY
+
+
 def maybe_hash(user_id):
     if config.HASH_AUTHORS:
-        return hashlib.sha256(str(user_id).encode()).hexdigest()[:16]
+        return hmac.new(_hash_key(), str(user_id).encode(), hashlib.sha256).hexdigest()[:16]
     return str(user_id)
+
+
+def maybe_name(user):
+    """익명화 모드면 이름을 저장하지 않는다 — 해시 옆에 닉네임을 같이 두면 익명화가 무의미."""
+    return None if config.HASH_AUTHORS else str(user)
 
 
 def is_owner(interaction: discord.Interaction):
@@ -134,7 +164,7 @@ def store_message(message: discord.Message, source: str):
         "channel_id": message.channel.id,
         "thread_id": message.channel.id if is_thread else None,
         "author_id": maybe_hash(message.author.id),
-        "author_name": str(message.author),
+        "author_name": maybe_name(message.author),
         "is_bot": int(message.author.bot),
         "content": content,
         "created_at": message.created_at.isoformat(),
@@ -159,7 +189,7 @@ def store_message(message: discord.Message, source: str):
             atts.append((message.id, a.filename, ext, a.content_type, a.size))
         gdb.insert_attachments(atts)
 
-        mentions = [(message.id, "user", u.id, str(u)) for u in message.mentions]
+        mentions = [(message.id, "user", maybe_hash(u.id), maybe_name(u)) for u in message.mentions]
         mentions += [(message.id, "role", r.id, r.name) for r in message.role_mentions]
         gdb.insert_mentions(mentions)
 
@@ -435,14 +465,14 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 async def on_member_join(member: discord.Member):
     if STATE == "collecting":
         gdb_for(member.guild).insert_member_event(
-            (member.guild.id, maybe_hash(member.id), str(member), "join", now_iso()))
+            (member.guild.id, maybe_hash(member.id), maybe_name(member), "join", now_iso()))
 
 
 @bot.event
 async def on_member_remove(member: discord.Member):
     if STATE == "collecting":
         gdb_for(member.guild).insert_member_event(
-            (member.guild.id, maybe_hash(member.id), str(member), "leave", now_iso()))
+            (member.guild.id, maybe_hash(member.id), maybe_name(member), "leave", now_iso()))
 
 
 @bot.event
@@ -458,7 +488,7 @@ async def on_voice_state_update(member, before, after):
     else:
         return
     gdb_for(member.guild).insert_voice_event(
-        (member.guild.id, ch.id, ch.name, maybe_hash(member.id), str(member), et, now_iso()))
+        (member.guild.id, ch.id, ch.name, maybe_hash(member.id), maybe_name(member), et, now_iso()))
 
 
 # ==========================================

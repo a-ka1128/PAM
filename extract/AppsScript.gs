@@ -1,10 +1,12 @@
 // =========================================================
 // 룩플 봇 → 구글 시트 (일정 / 정산 / 확인필요)
-//   - doPost: upsert(쓰기) + action:"delete"(행 삭제)
-//   - doGet: 확인필요 탭 읽기(JSON) — 봇이 처리(등록/무시) 읽어감
+//   - doPost: upsert(쓰기) + action:"delete"(행 삭제) + action:"read"(탭 읽기)
+//   - doGet: 탭 읽기(JSON) — 구버전 호환용(토큰이 URL에 남으므로 봇은 POST read를 쓴다)
 //   - 모든 시트 변경은 LockService로 직렬화
-//   - 봇 POST 형식: { "sheet":"일정", "items":[ {"key":"<msg.id>","fields":{...}}, ... ] }
-//                  { "sheet":"확인필요", "action":"delete", "keys":["<msg.id>", ...] }
+//   - 모든 요청은 토큰 필수 (스크립트 속성 API_TOKEN, 구 이름 READ_TOKEN도 인정)
+//   - 봇 POST 형식: { "token":"…", "sheet":"일정", "items":[ {"key":"<msg.id>","fields":{...}}, ... ] }
+//                  { "token":"…", "sheet":"확인필요", "action":"delete", "keys":["<msg.id>", ...] }
+//                  { "token":"…", "sheet":"확인필요", "action":"read" }
 // =========================================================
 var TABS = {
   "일정":     ["날짜", "작업내용", "진행내용", "담당자", "의뢰자", "상태", "D-day", "원본"],
@@ -19,6 +21,8 @@ var SETTLE_COLORS = { "미정산": "#fff2cc", "회사에서 미정산": "#fce5cd
 
 function doPost(e) {
   var d = JSON.parse(e.postData.contents);
+  if (!_tokenOk(d.token)) return _json({ ok: false, error: "unauthorized" });
+  if (d.action === "read") return _json(_readTab(d.sheet || "확인필요"));
   if (d.action === "delete") return doDelete(d);   // 신규: 행 삭제
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);                            // upsert/resort 직렬화
@@ -57,25 +61,27 @@ function doPost(e) {
         var rg = sh.getRange(row, 1, 1, keyCol);
         cur = rg.getValues()[0]; curF = rg.getFormulas()[0];
       }
-      var keep = function (ci) { return exists ? (curF[ci] ? curF[ci] : cur[ci]) : ""; };   // 사용자가 넣은 수식도 보존
+      // 사용자가 넣은 수식은 보존, 텍스트 값은 다시 쓸 때 수식으로 되살아나지 않게 _safeText
+      var keep = function (ci) { return exists ? (curF[ci] ? curF[ci] : _safeText(cur[ci])) : ""; };
       var out = [], fmt = {};                                                              // fmt: 열index → 숫자서식
       head.forEach(function (h, ci) {
         var provided = (f[h] !== undefined && f[h] !== null && String(f[h]).trim() !== "");
         if (h === "원본") {
-          out[ci] = f["링크"] ? '=HYPERLINK("' + String(f["링크"]).replace(/"/g, "") + '","원본")' : keep(ci);
+          var ln = String(f["링크"] || "");
+          out[ci] = LINK_RE.test(ln) ? '=HYPERLINK("' + ln + '","원본")' : keep(ci);   // 디스코드 메시지 링크만
         } else if (h === "D-day") {
           out[ci] = (dt >= 0) ? _ddayFormula(dateCol + row) : keep(ci);
         } else if (h === "날짜") {
           if (provided) {
             var dv = String(f[h]);
-            if (dv.indexOf("~") >= 0) { out[ci] = dv; fmt[ci] = "@"; }                    // 범위 → 텍스트 유지(정렬은 앞날짜 기준)
-            else { var pd = parseYmd(dv); if (pd) { out[ci] = pd; fmt[ci] = "yyyy-mm-dd"; } else out[ci] = dv; }   // 비표준 날짜 원문
+            if (dv.indexOf("~") >= 0) { out[ci] = _safeText(dv); fmt[ci] = "@"; }         // 범위 → 텍스트 유지(정렬은 앞날짜 기준)
+            else { var pd = parseYmd(dv); if (pd) { out[ci] = pd; fmt[ci] = "yyyy-mm-dd"; } else out[ci] = _safeText(dv); }   // 비표준 날짜 원문
           } else out[ci] = keep(ci);                                                        // 신규+날짜없음=빈칸
         } else if (h === "금액") {
           var num = provided ? parseInt(String(f[h]).replace(/[^0-9]/g, "")) : NaN;
           if (!isNaN(num)) { out[ci] = num; fmt[ci] = "#,##0"; } else out[ci] = keep(ci);
         } else {
-          out[ci] = provided ? f[h] : keep(ci);                                            // 기존행: 비공백만 덮기 / 신규행: 빈칸 초기화
+          out[ci] = provided ? _safeText(f[h]) : keep(ci);                                 // 기존행: 비공백만 덮기 / 신규행: 빈칸 초기화
         }
       });
       out[keyCol - 1] = it.key;
@@ -92,30 +98,46 @@ function doPost(e) {
 //   확인필요: 봇이 처리(등록/무시) 읽어감.  일정: 리마인더봇 아침 다이제스트용(읽기 전용).
 var READ_ALLOWED = { "확인필요": true, "일정": true, "정산": true };   // 정산: 미수금 나이 추적(다이제스트)
 
-// 읽기 토큰 — 배포 URL만 알면 일정 탭(의뢰자명·작업내용·원본링크)이 통째로 열람되던 문제 차단.
+// API 토큰 — 배포 URL만 알면 시트를 읽고·쓰고·지울 수 있던 문제 차단. 읽기/쓰기/삭제 모두 검사한다.
 //   ⚠️ 토큰은 소스에 넣지 말 것(이 파일은 git 추적됨). 스크립트 속성에 저장한다:
-//      Apps Script 편집기 → 프로젝트 설정 → 스크립트 속성 → READ_TOKEN = <임의 문자열>
-//   속성이 비어 있으면 기존처럼 무인증 동작(점진 배포용) — 설정하는 순간 강제된다.
-function _readTokenOk(e) {
-  var want = PropertiesService.getScriptProperties().getProperty("READ_TOKEN");
-  if (!want) return true;                        // 미설정 = 기존 동작 유지
-  var got = (e && e.parameter && e.parameter.token) || "";
-  return got === want;
+//      Apps Script 편집기 → 프로젝트 설정 → 스크립트 속성 → API_TOKEN = <긴 임의 문자열>
+//   (구 이름 READ_TOKEN도 인정). 속성이 비어 있으면 모든 요청을 거부한다(fail-closed).
+function _tokenOk(got) {
+  var p = PropertiesService.getScriptProperties();
+  var want = p.getProperty("API_TOKEN") || p.getProperty("READ_TOKEN") || "";
+  got = String(got || "");
+  if (!want || got.length !== want.length) return false;
+  var diff = 0;                                    // 상수시간 비교(타이밍으로 토큰 추측 방지)
+  for (var i = 0; i < want.length; i++) diff |= want.charCodeAt(i) ^ got.charCodeAt(i);
+  return diff === 0;
 }
 
+// 셀에 들어갈 외부 문자열이 =,+,-,@ 로 시작하면 수식으로 실행된다(디스코드 메시지 원문이 그대로 들어옴).
+//   앞에 '를 붙여 텍스트로 고정 — 시트에는 '가 보이지 않고 getValues도 원문 그대로 돌려준다.
+function _safeText(v) {
+  if (typeof v !== "string") return v;
+  return /^[=+\-@\t\r]/.test(v) ? "'" + v : v;
+}
+
+// 원본 열에는 봇이 만든 디스코드 메시지 링크만 HYPERLINK로 넣는다
+var LINK_RE = /^https:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/channels\/\d+\/\d+\/\d+$/;
+
 function doGet(e) {
-  var name = (e && e.parameter && e.parameter.sheet) || "확인필요";
+  if (!_tokenOk(e && e.parameter && e.parameter.token)) return _json({ ok: false, error: "unauthorized" });
+  return _json(_readTab((e && e.parameter && e.parameter.sheet) || "확인필요"));
+}
+
+function _readTab(name) {
   var out = { ok: true, sheet: name, rows: [] };
-  if (!_readTokenOk(e)) { out.ok = false; out.error = "unauthorized"; return _json(out); }
-  if (!READ_ALLOWED[name]) { out.ok = false; out.error = "not allowed"; return _json(out); }
+  if (!READ_ALLOWED[name]) { out.ok = false; out.error = "not allowed"; return out; }
   var head = TABS[name];
   var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
-  if (!sh) return _json(out);
+  if (!sh) return out;
   var keyCol = head.length + 1, last = sh.getLastRow();
-  if (last < 2) return _json(out);
+  if (last < 2) return out;
 
   var lock = LockService.getScriptLock();
-  try { lock.waitLock(20000); } catch (err) { out.ok = false; out.error = "locked"; return _json(out); }
+  try { lock.waitLock(20000); } catch (err) { out.ok = false; out.error = "locked"; return out; }
   try {
     var iSrc = head.indexOf("원본");
     var forms = (iSrc >= 0) ? sh.getRange(2, iSrc + 1, last - 1, 1).getFormulas() : null;
@@ -149,7 +171,7 @@ function doGet(e) {
       }
     }
   } finally { lock.releaseLock(); }
-  return _json(out);
+  return out;
 }
 
 function _json(o) {

@@ -14,3 +14,5 @@ NIM_BLOCKLIST = ["고객", "손님", "선생", "여러분", "회원", "운영자
 
 # 구글 시트 동기화용 Apps Script 웹앱 URL (비우면 CSV만 생성)
 WEBHOOK_URL = ""
+# 웹앱 API 토큰 — Apps Script 프로젝트 설정 > 스크립트 속성의 API_TOKEN 과 같은 값 (없으면 웹앱이 거부)
+API_TOKEN = ""

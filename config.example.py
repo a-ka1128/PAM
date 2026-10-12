@@ -16,7 +16,10 @@ OWNER_ID = 343290913172226049
 EXCLUDED_CHANNEL_IDS = []
 
 # 작성자/행위자 ID를 해시 처리할지 (True면 누가 썼는지 익명화, 패턴은 분석 가능)
+#   True면 이름(닉네임)도 저장하지 않는다. ID는 비밀 키 HMAC으로 해시(디스코드 ID로 역추적 불가).
 HASH_AUTHORS = False
+# 해시 비밀 키 (비우면 data/hash_key 를 자동 생성해 재사용 — 그 파일을 잃으면 이전 해시와 연결이 끊김)
+HASH_SALT = ""
 
 # 구조 스냅샷(채널/역할/인원) 자동 저장 주기(시간). 0이면 시작 시 1회만.
 SNAPSHOT_INTERVAL_HOURS = 12

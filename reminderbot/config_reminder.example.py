@@ -22,7 +22,7 @@ TICK_SECONDS = 60
 #   추출봇 config.py 의 WEBHOOK_URL 과 동일한 Apps Script 웹앱 URL을 넣으면 활성화.
 #   비워두면 다이제스트만 자동 OFF(재촉 기능은 정상). 시트 '일정' 탭(파생 데이터)만 읽음.
 WEBHOOK_URL = "여기에_AppsScript_웹앱_URL_붙여넣기(추출봇과_동일)"
-# 읽기 토큰 — Apps Script 프로젝트 설정 > 스크립트 속성의 READ_TOKEN 과 같은 값.
-#   설정하면 URL만 아는 사람은 일정 탭을 못 읽는다. 비워두면 인증 없이 읽음(기존 동작).
-READ_TOKEN = ""
+# 웹앱 API 토큰 — Apps Script 프로젝트 설정 > 스크립트 속성의 API_TOKEN 과 같은 값 (필수).
+#   토큰이 없거나 다르면 웹앱이 거부한다(구 이름 READ_TOKEN 도 인정).
+API_TOKEN = ""
 DIGEST_HOUR = 9        # KST 몇 시 이후 첫 점검에 하루 1회 발송

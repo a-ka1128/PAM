@@ -3,6 +3,7 @@
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _test_config  # noqa: F401  (config.py 없으면 템플릿으로 대체)
 import brain
 
 passed = 0

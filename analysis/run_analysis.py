@@ -32,7 +32,7 @@ def load_db(path):
     chans = pd.read_sql_query(
         "SELECT channel_id, channel_name, MAX(captured_at) ca FROM channel_snapshots GROUP BY channel_id", con)
     ments = pd.read_sql_query(
-        "SELECT target_name, COUNT(*) c FROM mentions WHERE target_type='user' "
+        "SELECT COALESCE(target_name, target_id) target_name, COUNT(*) c FROM mentions WHERE target_type='user' "
         "GROUP BY target_id ORDER BY c DESC LIMIT 5", con)
     react = con.execute("SELECT COUNT(*) FROM reactions").fetchone()[0]
     con.close()
@@ -67,7 +67,7 @@ def analyze_server(path, report):
     report.append(f"- **피크 시간대(KST)**: {peak}시 · **요일별**: " +
                   ", ".join(f"{DOW[int(d)]}{c}" for d, c in byd.items()))
 
-    topa = human["author_name"].value_counts().head(5)
+    topa = human["author_name"].fillna(human["author_id"]).value_counts().head(5)   # 익명화 모드면 해시로 집계
     report.append("- **활발한 사람(상위5)**: " + ", ".join(f"{a}({c})" for a, c in topa.items()))
 
     report.append(f"- 링크포함 {msgs['has_link'].mean() * 100:.0f}% · "

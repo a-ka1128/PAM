@@ -24,7 +24,8 @@ def push(kind, cols, rows):
     if not rows:
         print(kind, "→ 행 없음, 건너뜀")
         return
-    body = json.dumps({"sheet": kind, "cols": cols, "rows": rows}, ensure_ascii=False).encode("utf-8")
+    tok = getattr(config, "API_TOKEN", "")       # Apps Script 스크립트 속성 API_TOKEN과 같은 값
+    body = json.dumps({"sheet": kind, "cols": cols, "rows": rows, "token": tok}, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(config.WEBHOOK_URL, data=body, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=40) as resp:

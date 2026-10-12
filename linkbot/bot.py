@@ -853,8 +853,19 @@ async def _before_resolve():
     await client.wait_until_ready()
 
 
+async def _owner_only(inter: discord.Interaction):
+    """명령은 OWNER_ID만 — 아무 멤버나 /과거등록(force 시 레지스트리 리셋 + LLM 대량 호출)을 돌리던 문제 차단.
+    통과면 True, 아니면 본인에게만 보이는 거절 응답을 보내고 False."""
+    if inter.user.id == config.OWNER_ID:
+        return True
+    await inter.response.send_message("이 명령은 봇 관리자만 쓸 수 있어요.", ephemeral=True)
+    return False
+
+
 @tree.command(name="상태", description="봇 상태")
 async def status_cmd(inter: discord.Interaction):
+    if not await _owner_only(inter):
+        return
     await inter.response.send_message(
         f"🟢 추출봇 가동 중 | 서버 {len(client.guilds)} | 플래그 {len(flagged)}건", ephemeral=True)
 
@@ -887,6 +898,8 @@ async def _category_ac(inter: discord.Interaction, current: str):
                        force="이미 등록된 것도 다시 등록 (시트 초기화 후 재등록용)")
 @app_commands.autocomplete(category=_category_ac)
 async def backfill_cmd(inter: discord.Interaction, category: str = None, days: int = 30, force: bool = False):
+    if not await _owner_only(inter):
+        return
     await inter.response.defer(ephemeral=True)
     g = inter.guild
     if g is None:

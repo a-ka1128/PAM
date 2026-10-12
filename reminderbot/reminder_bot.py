@@ -437,8 +437,18 @@ async def _before_digest():
     await client.wait_until_ready()
 
 
+async def _owner_only(inter: discord.Interaction):
+    """명령은 OWNER_ID만 — 아무 멤버나 남의 추적을 해제하거나 /브리핑으로 소유자 DM을 쏘던 문제 차단."""
+    if inter.user.id == config.OWNER_ID:
+        return True
+    await inter.response.send_message("이 명령은 봇 관리자만 쓸 수 있어요.", ephemeral=True)
+    return False
+
+
 @tree.command(name="추적목록", description="현재 재촉 중인 작업")
 async def list_cmd(inter: discord.Interaction):
+    if not await _owner_only(inter):
+        return
     if not tracked:
         await inter.response.send_message("재촉 중인 작업 없음.", ephemeral=True)
         return
@@ -449,6 +459,8 @@ async def list_cmd(inter: discord.Interaction):
 
 @tree.command(name="추적해제", description="추적 해제 (메시지 ID)")
 async def untrack_cmd(inter: discord.Interaction, message_id: str):
+    if not await _owner_only(inter):
+        return
     key = int(message_id) if message_id.isdigit() else None
     if key is not None and tracked.pop(key, None) is not None:
         state.del_tracked(key)
@@ -459,6 +471,8 @@ async def untrack_cmd(inter: discord.Interaction, message_id: str):
 
 @tree.command(name="리마인더상태", description="리마인더봇 상태")
 async def status_cmd(inter: discord.Interaction):
+    if not await _owner_only(inter):
+        return
     dg = "ON" if config.WEBHOOK_URL else "OFF"
     await inter.response.send_message(
         f"🟢 리마인더봇 가동 중 | 서버 {len(client.guilds)} | 추적 {len(tracked)}건 | 다이제스트 {dg}",
@@ -467,6 +481,8 @@ async def status_cmd(inter: discord.Interaction):
 
 @tree.command(name="브리핑", description="지금 아침 다이제스트 미리보기 DM (스케줄·기준선 미변경)")
 async def digest_now_cmd(inter: discord.Interaction):
+    if not await _owner_only(inter):
+        return
     if not config.WEBHOOK_URL:
         await inter.response.send_message("다이제스트 미설정(config WEBHOOK_URL 비어있음).", ephemeral=True)
         return

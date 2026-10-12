@@ -3,7 +3,6 @@ import json
 import time
 import urllib.error
 import urllib.request
-import urllib.parse
 import config
 
 # Apps Script는 LockService로 모든 요청을 직렬화한다. 봇이 몇 분마다 확인필요를 폴링하고
@@ -16,8 +15,24 @@ _RETRY_WAITS = (3.0, 10.0)      # n번째 실패 후 대기(초) — 뒤로 갈�
 _TRANSIENT = (404, 429, 500, 502, 503, 504)
 
 
+def _token():
+    """Apps Script 스크립트 속성 API_TOKEN과 같은 값. 읽기·쓰기·삭제 모두 이 토큰이 있어야 통과한다.
+    (구 이름 READ_TOKEN도 인정)"""
+    return getattr(config, "API_TOKEN", "") or getattr(config, "READ_TOKEN", "")
+
+
+def _post(payload, timeout):
+    """웹앱에 JSON POST → 응답 본문(str). 토큰은 URL이 아니라 본문에 실어 로그·기록에 안 남게 한다."""
+    body = json.dumps(dict(payload, token=_token()), ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        config.WEBHOOK_URL, data=body,
+        headers={"Content-Type": "application/json; charset=utf-8"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", "replace")
+
+
 class _Locked(Exception):
-    """doGet이 락 대기(20s)를 못 이기고 {"ok":false,"error":"locked"}를 돌려준 경우 — 일시적이라 재시도 대상."""
+    """읽기가 락 대기(20s)를 못 이기고 {"ok":false,"error":"locked"}를 돌려준 경우 — 일시적이라 재시도 대상."""
 
 
 def _transient(e):
@@ -41,34 +56,33 @@ def _request(make_call):
     raise last
 
 
+def _write(payload):
+    """쓰기/삭제 요청. 성공 응답은 "ok:N"/"deleted:N" 텍스트, 웹앱 거부(unauthorized 등)는 JSON이라
+    호출부가 성공으로 오인하지 않게 "err:..."로 바꿔 돌려준다."""
+    try:
+        r = _request(lambda: _post(payload, 90))        # GAS 콜드스타트/락 대기 대응 (구 30s는 부족)
+    except Exception as e:
+        return f"err:{e}"
+    if r.lstrip().startswith("{"):
+        try:
+            err = json.loads(r).get("error")
+        except (ValueError, AttributeError):
+            err = None
+        return f"err:{err or r[:80]}"
+    return r
+
+
 def push(sheet, items, mode="upsert"):
     """items = [{'key': '<msg_id>#<i>', 'fields': {...}}]. mode: 'upsert'(전체덮기) | 'merge'(부분병합)."""
     if not items:
         return None
-    body = json.dumps({"sheet": sheet, "mode": mode, "items": items}, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        config.WEBHOOK_URL, data=body,
-        headers={"Content-Type": "application/json; charset=utf-8"})
-    def call():
-        with urllib.request.urlopen(req, timeout=90) as r:      # GAS 콜드스타트/락 대기 대응 (구 30s는 부족)
-            return r.read().decode("utf-8", "replace")
-    try:
-        return _request(call)
-    except Exception as e:
-        return f"err:{e}"
+    return _write({"sheet": sheet, "mode": mode, "items": items})
 
 
 def fetch(sheet):
-    """doGet으로 탭 읽기. 성공: rows 리스트, 실패: {'err':..}
-    READ_TOKEN: Apps Script 쪽 스크립트 속성과 같은 값을 config에 두면 인증 읽기가 된다
-    (미설정이면 기존처럼 토큰 없이 요청 — 점진 배포)."""
-    url = config.WEBHOOK_URL + "?sheet=" + urllib.parse.quote(sheet)
-    tok = getattr(config, "READ_TOKEN", "")
-    if tok:
-        url += "&token=" + urllib.parse.quote(tok)
+    """action=read로 탭 읽기. 성공: rows 리스트, 실패: {'err':..}"""
     def call():
-        with urllib.request.urlopen(url, timeout=120) as r:     # doGet은 콜드스타트+락으로 최대 ~74s 관측 → 120s
-            data = json.loads(r.read().decode("utf-8", "replace"))
+        data = json.loads(_post({"sheet": sheet, "action": "read"}, 120))   # 콜드스타트+락으로 최대 ~74s 관측 → 120s
         if isinstance(data, dict) and data.get("error") == "locked":
             raise _Locked("locked")                             # 락 경합 → _request가 다시 시도
         return data
@@ -87,14 +101,4 @@ def delete_rows(sheet, keys):
     """doPost(action=delete)로 _key 일치 행 삭제."""
     if not keys:
         return None
-    body = json.dumps({"sheet": sheet, "action": "delete", "keys": keys},
-                      ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(config.WEBHOOK_URL, data=body,
-                                 headers={"Content-Type": "application/json; charset=utf-8"})
-    def call():
-        with urllib.request.urlopen(req, timeout=90) as r:      # 삭제도 락 직렬화라 느릴 수 있음 → 90s
-            return r.read().decode("utf-8", "replace")
-    try:
-        return _request(call)
-    except Exception as e:
-        return f"err:{e}"
+    return _write({"sheet": sheet, "action": "delete", "keys": keys})
