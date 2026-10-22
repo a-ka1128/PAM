@@ -94,7 +94,8 @@ SETTLE_SCHEMA = {
     "required": ["found", "항목", "금액", "상태"]}
 
 
-# thinking 지원 모델 프리픽스 — 즉답형 프롬프트라 생각과정 비활성 (미지원 모델에 넣으면 400)
+# thinking 지원 모델 이름 조각 — 즉답형 프롬프트라 생각과정 비활성 (미지원 모델에 넣으면 400)
+#   이름 안 어디에 있어도 찾는다: hf.co/unsloth/Qwen3.8-27B-GGUF 처럼 앞에 경로가 붙고 대문자인 모델이 있다.
 _THINK_OFF_PREFIXES = ("qwen3", "deepseek-r1", "magistral")
 
 
@@ -118,7 +119,7 @@ def ollama(prompt, schema=None, think=False):
                            "num_ctx": getattr(config, "NUM_CTX", 8192)}}
     if schema is not None:
         payload["format"] = schema         # 문법 강제(constrained decoding) → 항상 유효 JSON
-    if any(config.MODEL.startswith(p) for p in _THINK_OFF_PREFIXES):
+    if any(p in config.MODEL.lower() for p in _THINK_OFF_PREFIXES):
         payload["think"] = bool(think)
     body = json.dumps(payload).encode("utf-8")
     last = None

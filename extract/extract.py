@@ -78,7 +78,7 @@ def norm_status(s):
 
 # ---------- LLM / DB ----------
 def ollama(prompt):
-    body = json.dumps({"model": config.MODEL, "prompt": prompt, "stream": False,
+    body = json.dumps({"model": config.MODEL, "prompt": prompt, "stream": False, "think": False,
                        "options": {"temperature": 0}}).encode("utf-8")
     req = urllib.request.Request(OLLAMA, data=body, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=120) as r:

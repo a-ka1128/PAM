@@ -23,7 +23,7 @@ THINKING_PREFIXES = ("qwen3", "deepseek-r1", "magistral")
 
 
 def _make_ollama(model):
-    think_off = any(model.startswith(p) for p in THINKING_PREFIXES)
+    think_off = any(p in model.lower() for p in THINKING_PREFIXES)  # hf.co/.../Qwen3... 도 잡는다
 
     def _call(prompt, schema=None):
         payload = {"model": model, "prompt": prompt, "stream": False,

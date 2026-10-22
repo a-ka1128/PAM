@@ -1,7 +1,7 @@
 # config.example.py → config.py 로 복사 (config.py 는 gitignore됨)
 # 추출(A 엔진) 설정
 
-MODEL = "qwen2.5:7b"        # 추출에 쓸 로컬 LLM
+MODEL = "qwen3:8b"          # 추출에 쓸 로컬 LLM (qwen2.5·exaone 은 2026-10 정리 대상)
 N_TARGET = 10              # 뽑을 총 항목 수 (마감+정산 합쳐서 대략)
 SCAN_LIMIT = 80           # 채널그룹별 스캔할 최근 메시지 수
 CONTEXT_WINDOW = 3        # 의뢰자("님") 찾을 때 같은 채널에서 앞뒤로 볼 메시지 수

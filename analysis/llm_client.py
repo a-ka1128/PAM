@@ -7,7 +7,8 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 
 
 def generate(model, prompt, timeout=240, options=None):
-    body = {"model": model, "prompt": prompt, "stream": False}
+    # think: qwen3 계열이 답보다 생각을 먼저 길게 써서 느려지는 것을 막는다 (생각 없는 모델은 무시)
+    body = {"model": model, "prompt": prompt, "stream": False, "think": False}
     if options:
         body["options"] = options
     data = json.dumps(body).encode("utf-8")

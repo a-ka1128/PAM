@@ -1,7 +1,7 @@
 # =========================================================
 # 분석 하네스 — data/<서버>.db 들을 읽어 통계 + LLM 분류 + 자동화 제안
 #   사용: python analysis/run_analysis.py
-#   환경변수: SAMPLE(표본 크기, 기본 40), MODEL(기본 qwen2.5:7b)
+#   환경변수: SAMPLE(표본 크기, 기본 40), MODEL(기본 qwen3:8b)
 #   전부 로컬. LLM 호출도 로컬 Ollama. 리포트는 analysis/report.md (집계만).
 # =========================================================
 import os
@@ -21,7 +21,7 @@ DATA_DIR = os.path.join(BASE, "data")
 KST = datetime.timezone(datetime.timedelta(hours=9))
 DOW = ["월", "화", "수", "목", "금", "토", "일"]
 
-MODEL = os.environ.get("MODEL", "qwen2.5:7b")
+MODEL = os.environ.get("MODEL", "qwen3:8b")
 SAMPLE_SIZE = int(os.environ.get("SAMPLE", "40"))
 CATEGORIES = ["질문", "잡담", "건의", "버그제보", "공지", "정보공유", "기타"]
 
