@@ -5,10 +5,14 @@ import json
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 
+# thinking 지원 모델 이름 조각 (linkbot/brain.py 와 같음) — 미지원 모델에 think 를 넣으면 400
+_THINK_OFF_PREFIXES = ("qwen3", "deepseek-r1", "magistral")
+
 
 def generate(model, prompt, timeout=240, options=None):
-    # think: qwen3 계열이 답보다 생각을 먼저 길게 써서 느려지는 것을 막는다 (생각 없는 모델은 무시)
-    body = {"model": model, "prompt": prompt, "stream": False, "think": False}
+    body = {"model": model, "prompt": prompt, "stream": False}
+    if any(p in model.lower() for p in _THINK_OFF_PREFIXES):
+        body["think"] = False  # 답보다 생각을 먼저 길게 써서 느려지는 것을 막는다
     if options:
         body["options"] = options
     data = json.dumps(body).encode("utf-8")

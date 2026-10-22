@@ -23,6 +23,8 @@ BASE = os.path.dirname(HERE)
 DATA_DIR = os.path.join(BASE, "data")
 OLLAMA = "http://localhost:11434/api/generate"
 PROCESSED_PATH = os.path.join(HERE, "_processed.json")
+# thinking 지원 모델 이름 조각 (linkbot/brain.py 와 같음) — 미지원 모델에 think 를 넣으면 400
+THINK_OFF_PREFIXES = ("qwen3", "deepseek-r1", "magistral")
 
 NIM_RE = re.compile(r"([가-힣A-Za-z0-9_]{1,12})님")
 BLOCK = set(getattr(config, "NIM_BLOCKLIST", []))
@@ -78,8 +80,10 @@ def norm_status(s):
 
 # ---------- LLM / DB ----------
 def ollama(prompt):
-    body = json.dumps({"model": config.MODEL, "prompt": prompt, "stream": False, "think": False,
-                       "options": {"temperature": 0}}).encode("utf-8")
+    payload = {"model": config.MODEL, "prompt": prompt, "stream": False, "options": {"temperature": 0}}
+    if any(p in config.MODEL.lower() for p in THINK_OFF_PREFIXES):
+        payload["think"] = False
+    body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(OLLAMA, data=body, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=120) as r:
         return json.loads(r.read()).get("response", "").strip()
